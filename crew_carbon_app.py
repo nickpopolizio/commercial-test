@@ -154,14 +154,14 @@ with st.sidebar:
         influent_alk  = _opt("Alkalinity",            help="Total alkalinity as CaCO₃")
 
     with st.expander("📋 Effluent permit limits / targets"):
-        st.caption("Enter any regulatory limits from your permit or design targets.")
+        st.caption("Enter any regulatory limits from the plant's permit or design targets.")
         target_nh3  = _opt("Ammonia limit, NH₃-N",        help="Effluent NH₃-N target or permit limit")
         target_no3  = _opt("Nitrate limit, NO₃-N",        help="Effluent NO₃-N target or permit limit")
         target_tn   = _opt("Total nitrogen (TN) limit",   help="Combined N limit")
         target_tp   = _opt("Total phosphorus (TP) limit", help="Phosphorus limit")
 
     with st.expander("⚙️ Operational / settling data"):
-        st.caption("From your MLSS or settleability records.")
+        st.caption("From the plant's MLSS or settleability records.")
         current_svi     = _opt("Current SVI", unit="mL/g",
                                help="Sludge volume index — measures settling behaviour")
         target_svi_red  = _opt("Target SVI reduction", unit="%",
