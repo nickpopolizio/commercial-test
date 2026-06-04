@@ -580,16 +580,23 @@ class IntakeRecommendationEngine:
         # ── Path A ────────────────────────────────────────────────────────────
         if nh3_known and alk_measured and target_known:
             dose = dose_from_balance(influent_alk)
+            _alk_consumed  = round(nh3_removed * ALK_CONSUMED_PER_NH3, 1)
+            _usable_influent = round(max(0.0, influent_alk - target_res), 1)
+            _deficit       = round(max(0.0, net_alk_demand - _usable_influent), 1)
             return (
                 dose, Confidence.HIGH,
                 "Full stoichiometric alkalinity mass balance",
                 (
-                    f"With {inp.influent_nh3_mgl:.0f} mg/L incoming ammonia and a target of "
-                    f"{inp.target_nh3_mgl or '~3'} mg/L, nitrification will consume approximately "
-                    f"{nh3_removed * ALK_CONSUMED_PER_NH3:.0f} mg/L of alkalinity. "
-                    f"Measured influent alkalinity of {influent_alk:.0f} mg/L as CaCO₃ "
-                    f"{'covers this demand — only a small maintenance dose is needed' if dose < 10 else 'is not sufficient on its own'}. "
-                    f"A dose of {dose:.0f} mg/L GCC maintains a safe residual of {target_res:.0f} mg/L."
+                    f"Nitrification of {nh3_removed:.1f} mg/L NH₃-N consumes "
+                    f"{_alk_consumed:.0f} mg/L of alkalinity (7.14 mg CaCO₃ per mg NH₃-N). "
+                    f"Influent alkalinity of {influent_alk:.0f} mg/L provides "
+                    f"{_usable_influent:.0f} mg/L usable above the {target_res:.0f} mg/L safety residual. "
+                    + (f"This covers the full demand — only a small maintenance dose is needed."
+                       if dose < 10 else
+                       f"Deficit = {_alk_consumed:.0f} − {_usable_influent:.0f} = {_deficit:.0f} mg/L "
+                       f"must be supplemented. At {eff*100:.0f}% dissolution, "
+                       f"a dose of {dose:.0f} mg/L GCC closes this gap and maintains "
+                       f"the {target_res:.0f} mg/L safety residual.")
                 ),
                 assumptions,
             )
@@ -604,15 +611,20 @@ class IntakeRecommendationEngine:
                 assumptions.append("Full nitrification to 3 mg/L assumed (conservative)")
 
             dose = dose_from_balance(influent_alk)
+            _usable_influent = round(max(0.0, influent_alk - target_res), 1)
+            _deficit         = round(max(0.0, net_alk_demand - _usable_influent), 1)
             return (
                 dose, Confidence.MEDIUM,
                 "Alkalinity deficit calculation with estimated nitrogen demand",
                 (
-                    f"Starting from the measured alkalinity of {influent_alk:.0f} mg/L as CaCO₃, "
-                    f"the estimated nitrification demand of {net_alk_demand:.0f} mg/L "
-                    f"{'leaves adequate headroom — a small dose maintains the safety buffer' if dose < 10 else 'creates a deficit that GCC needs to cover'}. "
-                    f"A dose of {dose:.0f} mg/L GCC will maintain the {target_res:.0f} mg/L "
-                    f"target residual. Entering effluent permit limits will refine this further."
+                    f"Estimated nitrification demand: {net_alk_demand:.0f} mg/L as CaCO₃. "
+                    f"Influent alkalinity of {influent_alk:.0f} mg/L provides "
+                    f"{_usable_influent:.0f} mg/L usable above the {target_res:.0f} mg/L safety residual. "
+                    + (f"This covers the full demand — only a small maintenance dose is needed."
+                       if dose < 10 else
+                       f"Deficit = {net_alk_demand:.0f} − {_usable_influent:.0f} = {_deficit:.0f} mg/L. "
+                       f"At {eff*100:.0f}% dissolution, a dose of {dose:.0f} mg/L GCC closes this gap. "
+                       f"Entering effluent permit limits will refine this further.")
                 ),
                 assumptions,
             )
@@ -628,15 +640,18 @@ class IntakeRecommendationEngine:
                 assumptions.append(f"Incoming ammonia assumed {ASSUMED_INFLUENT_NH3:.0f} mg/L")
 
             dose = dose_from_balance(est_alk)
+            _usable_ph = round(max(0.0, est_alk - target_res), 1)
+            _deficit_ph = round(max(0.0, net_alk_demand - _usable_ph), 1)
             return (
                 dose, Confidence.LOW,
                 "pH-derived alkalinity estimate",
                 (
                     f"A pH of {inp.influent_ph:.1f} suggests an influent alkalinity of roughly "
-                    f"{est_alk:.0f} mg/L as CaCO₃. Based on this and an estimated nitrification "
-                    f"demand of {net_alk_demand:.0f} mg/L, a dose of {dose:.0f} mg/L is indicated. "
-                    "We recommend measuring alkalinity directly — it takes 5 minutes on-site "
-                    "and will move this estimate into the Medium–High confidence range."
+                    f"{est_alk:.0f} mg/L as CaCO₃, providing {_usable_ph:.0f} mg/L usable above "
+                    f"the {target_res:.0f} mg/L safety residual. Against a nitrification demand of "
+                    f"{net_alk_demand:.0f} mg/L, this leaves a deficit of {_deficit_ph:.0f} mg/L. "
+                    f"At {eff*100:.0f}% dissolution, {dose:.0f} mg/L GCC closes this gap. "
+                    "Measuring alkalinity directly (5 minutes on-site) would move this to Medium–High confidence."
                 ),
                 assumptions,
             )
@@ -646,14 +661,18 @@ class IntakeRecommendationEngine:
             assumptions.append(f"Incoming ammonia assumed {ASSUMED_INFLUENT_NH3:.0f} mg/L (typical municipal)")
             assumptions.append(f"Influent alkalinity assumed {ASSUMED_INFLUENT_ALK:.0f} mg/L (typical municipal)")
             dose = dose_from_balance(ASSUMED_INFLUENT_ALK)
+            _usable_d = round(max(0.0, ASSUMED_INFLUENT_ALK - target_res), 1)
+            _deficit_d = round(max(0.0, net_alk_demand - _usable_d), 1)
             return (
                 dose, Confidence.LOW,
                 "Permit-limit estimate using assumed influent quality",
                 (
-                    f"Using the plant's effluent limits and typical municipal influent values, a starting "
-                    f"dose of {dose:.0f} mg/L is estimated. This could vary significantly depending "
-                    f"on actual water quality. Entering the plant's measured alkalinity is the single "
-                    "most impactful step to improve this recommendation."
+                    f"Assuming typical influent alkalinity of {ASSUMED_INFLUENT_ALK:.0f} mg/L, "
+                    f"{_usable_d:.0f} mg/L is usable above the {target_res:.0f} mg/L safety residual. "
+                    f"Against an estimated nitrification demand of {net_alk_demand:.0f} mg/L, "
+                    f"the deficit is {_deficit_d:.0f} mg/L, requiring {dose:.0f} mg/L GCC at "
+                    f"{eff*100:.0f}% dissolution. This estimate could vary significantly — entering "
+                    "measured alkalinity is the single most impactful step to improve accuracy."
                 ),
                 assumptions,
             )
