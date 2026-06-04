@@ -214,35 +214,76 @@ with st.sidebar:
     st.divider()
 
     st.markdown("**Required**")
+    st.caption("Flow, GCC cost, and pH are the minimum recommended inputs.")
     flow_mgd = st.number_input(
         "Flow", min_value=0.1, max_value=500.0, value=5.0,
         step=0.5, format="%.1f",
-        help="Plant flow in million gallons per day (MGD)",
+        help="Plant flow in million gallons per day (MGD). Required.",
     )
     st.caption("million gallons / day")
     gcc_cost = st.number_input(
         "GCC product cost ($ / metric ton)",
         min_value=10.0, max_value=1000.0, value=120.0,
         step=10.0, format="%.0f",
+        help="Cost of CREW-verified CaCO₃ delivered to site. Required.",
     )
 
     st.divider()
 
     with st.expander("💧 Influent water quality readings", expanded=True):
         st.caption("Enter whatever values you have from a recent lab report.")
-        influent_nh3 = _opt("Ammonia, NH₃-N",       help="Incoming ammonia nitrogen")
-        influent_no2 = _opt("Nitrite, NO₂-N",        help="Incoming nitrite nitrogen")
-        influent_no3 = _opt("Nitrate, NO₃-N",        help="Incoming nitrate nitrogen")
-        influent_p   = _opt("Ortho-phosphorus, PO₄", help="Incoming orthophosphate")
-        influent_ph  = _opt("pH",          unit="",  help="Incoming wastewater pH (0–14)")
-        influent_alk = _opt("Alkalinity",             help="Total alkalinity as CaCO₃")
+        influent_nh3 = _opt("Ammonia, NH₃-N",
+            help="Incoming ammonia nitrogen (NH₃-N). "
+                 "If not provided: 30 mg/L is assumed — typical municipal influent. "
+                 "Providing this value significantly improves dose accuracy.")
+        influent_no2 = _opt("Nitrite, NO₂-N",
+            help="Incoming nitrite nitrogen. "
+                 "If not provided: excluded from the calculation (negligible in most influents).")
+        influent_no3 = _opt("Nitrate, NO₃-N",
+            help="Incoming nitrate nitrogen. "
+                 "If not provided: no denitrification alkalinity credit is applied — conservative.")
+        influent_p   = _opt("Ortho-phosphorus, PO₄",
+            help="Incoming orthophosphate. "
+                 "If not provided: phosphorus is not factored into alkalinity demand.")
+        influent_ph  = _opt("pH", unit="",
+            help="Incoming wastewater pH (0–14). Recommended minimum input. "
+                 "If not provided and alkalinity is also blank: 150 mg/L alkalinity is assumed. "
+                 "If provided without alkalinity, pH is used to estimate alkalinity.")
+        influent_alk = _opt("Alkalinity",
+            help="Total alkalinity as CaCO₃ (mg/L). Highest-value single data point. "
+                 "If not provided: estimated from pH if available, otherwise 150 mg/L is assumed. "
+                 "A direct measurement takes ~5 minutes on-site and moves the estimate to Medium–High confidence.")
+
+        if influent_alk is None:
+            st.checkbox(
+                "Objective: Maintain residual alkalinity to protect nitrification",
+                value=True,
+                help="Confirms the dosing objective is to maintain a safe minimum residual CaCO₃ "
+                     "to prevent nitrification loss. Adjust the Target Residual slider in GCC "
+                     "settings to change the safety margin (50–200 mg/L as CaCO₃).",
+            )
+            if influent_ph is None:
+                st.caption(
+                    "ℹ️ No alkalinity or pH entered — assuming 150 mg/L as CaCO₃. "
+                    "Enter pH at minimum for a site-specific estimate."
+                )
+            else:
+                st.caption("ℹ️ Alkalinity estimated from pH — a direct measurement would significantly improve accuracy.")
 
     with st.expander("📋 Effluent permit limits / targets"):
-        st.caption("Enter any regulatory limits from the plant's permit or design targets.")
-        target_nh3 = _opt("Ammonia limit, NH₃-N",       help="Effluent NH₃-N target or permit limit")
-        target_no3 = _opt("Nitrate limit, NO₃-N",       help="Effluent NO₃-N target or permit limit")
-        target_tn  = _opt("Total nitrogen (TN) limit",  help="Combined N limit")
-        target_tp  = _opt("Total phosphorus (TP) limit",help="Phosphorus limit")
+        st.caption("Enter regulatory limits from the plant's permit or design targets.")
+        target_nh3 = _opt("Ammonia limit, NH₃-N",
+            help="Effluent NH₃-N target or permit limit. "
+                 "If not provided: full nitrification to 3 mg/L is assumed (conservative).")
+        target_no3 = _opt("Nitrate limit, NO₃-N",
+            help="Effluent NO₃-N target or permit limit. "
+                 "If not provided: no denitrification credit is applied — conservative, increases dose estimate.")
+        target_tn  = _opt("Total nitrogen (TN) limit",
+            help="Combined TN permit limit (NH₃ + NO₃ + NO₂ + organic N). "
+                 "If not provided: only nitrification demand is considered.")
+        target_tp  = _opt("Total phosphorus (TP) limit",
+            help="Effluent TP limit. "
+                 "If not provided: phosphorus is excluded from the alkalinity demand calculation.")
 
     with st.expander("⚙️ Operational / settling data"):
         st.caption("From the plant's MLSS or settleability records.")
@@ -256,8 +297,12 @@ with st.sidebar:
                                      help="Fraction of dosed GCC that dissolves.")
         residual_target  = st.slider(
             "Target residual alkalinity (mg/L as CaCO₃)",
-            int(MIN_RESIDUAL_ALK), 100, int(TARGET_RESIDUAL_ALK), 5,
-            help="Safety buffer to protect nitrifying bacteria from pH swings.",
+            int(MIN_RESIDUAL_ALK), 200, int(TARGET_RESIDUAL_ALK), 5,
+            help="Minimum residual alkalinity to maintain in the bioreactor. "
+                 "50 mg/L = hard safety floor (nitrification protection). "
+                 "75 mg/L = standard design target. "
+                 "120+ mg/L = AEM™ enhanced optimization range. "
+                 "Use higher values when data is limited — increases conservatism.",
         )
 
     st.divider()
