@@ -37,6 +37,9 @@ for _name, _file in [
 
 from crew_intake_engine import (
     ALK_CHEMICAL_EQUIVALENCE,
+    ASSUMED_SRT_DAYS,
+    CA2_MEQL_FLOC_MIN,
+    CA2_MEQL_FLOC_OPTIMAL,
     ENHANCED_RESIDUAL_ALK,
     MIN_RESIDUAL_ALK,
     TARGET_RESIDUAL_ALK,
@@ -249,6 +252,11 @@ with st.sidebar:
             help="Incoming wastewater pH (0–14). Recommended minimum input. "
                  "If not provided and alkalinity is also blank: 150 mg/L alkalinity is assumed. "
                  "If provided without alkalinity, pH is used to estimate alkalinity.")
+        wastewater_temp = _opt("Wastewater temperature", unit="°C",
+            help="Average mixed liquor or influent temperature. "
+                 "Used to assess nitrification reliability via Arrhenius correction (θ = 1.072). "
+                 "If not provided: temperature risk assessment is skipped. "
+                 "Critical for cold-climate or seasonal facilities.")
         influent_alk = _opt("Alkalinity",
             help="Total alkalinity as CaCO₃ (mg/L). Highest-value single data point. "
                  "If not provided: estimated from pH if available, otherwise 150 mg/L is assumed. "
@@ -329,6 +337,7 @@ inputs = FacilityInputs(
     influent_ortho_p_mgl         = influent_p,
     influent_ph                  = influent_ph,
     influent_alkalinity_mgl      = influent_alk,
+    wastewater_temp_c            = wastewater_temp,
     target_nh3_mgl               = target_nh3,
     target_no3_mgl               = target_no3,
     target_tn_mgl                = target_tn,
@@ -438,6 +447,24 @@ st.caption(
 )
 
 
+# ── Temperature / nitrification risk ─────────────────────────────────────────
+
+if rec.temp_risk_level is not None:
+    _risk_colors = {
+        "Low":      ("success", "✅"),
+        "Moderate": ("warning", "⚠️"),
+        "High":     ("warning", "🔴"),
+        "Critical": ("error",   "🚫"),
+    }
+    _box_fn, _icon = _risk_colors.get(rec.temp_risk_level, ("info", "ℹ️"))
+    getattr(st, _box_fn)(
+        f"{_icon} **Nitrification Risk at {wastewater_temp:.0f}°C — {rec.temp_risk_level}**\n\n"
+        f"{rec.temp_risk_note}\n\n"
+        f"*Basis: Arrhenius θ = 1.072 for AOB; assumed SRT {ASSUMED_SRT_DAYS:.0f} d "
+        f"(conservative BNR reference — confirm with facility).*"
+    )
+
+
 # ── Cost comparison (replacement scenario) ────────────────────────────────────
 
 if commercial_scenario == CommercialScenario.ALKALINITY_REPLACEMENT and existing_spend_per_month:
@@ -485,6 +512,44 @@ if commercial_scenario == CommercialScenario.ALKALINITY_REPLACEMENT and existing
         f"GCC delivers equivalent alkalinity at {dissolution_pct}% dissolution efficiency."
     )
 
+    # Caustic / hydroxide overdose risk flag
+    if rec.existing_chem_has_overdose_risk:
+        st.warning(
+            f"⚠️ **Process Risk — {existing_chemical}:**  "
+            f"Hydroxide-based chemicals react instantaneously and can drive localized pH to "
+            f"≥10 at the feed point, detrimentally affecting nitrifying bacteria "
+            f"*(WEF MOP OM-9)*. CaCO₃ is self-limiting — dissolution stops as pH rises "
+            f"toward equilibrium, eliminating the risk of biological process upset from "
+            f"overdosing. This process risk is not captured in the cost comparison above."
+        )
+
+    # DIC / mechanistic differentiation
+    with st.expander("🔬 Why CaCO₃ is more than an alkalinity source", expanded=False):
+        st.markdown(
+            "Unlike caustic soda, magnesium hydroxide, or lime, CREW's soluble CaCO₃ "
+            "delivers **three simultaneous mechanisms** that hydroxide-only sources cannot:\n\n"
+            "**1. Dissolved Inorganic Carbon (DIC) — nitrifier carbon source**  \n"
+            "Autotrophic ammonia-oxidizing (AOB) and nitrite-oxidizing (NOB) bacteria use "
+            "bicarbonate as their carbon source for biomass synthesis — not organic carbon. "
+            "CaCO₃ dissolution releases bicarbonate directly into the mixed liquor, feeding "
+            "nitrifiers. NaOH adds OH⁻ only; it provides no inorganic carbon. At equivalent "
+            "alkalinity equivalents, CaCO₃ sustains nitrifier growth where caustic cannot "
+            "*(Metcalf & Eddy 5e; WEF Treatment Fundamentals)*.\n\n"
+            "**2. Free Ca²⁺ ions — floc bridging and settleability**  \n"
+            f"Ca²⁺ ions act as electrostatic bridges between negatively charged cell surfaces "
+            f"and extracellular polymers, forming stable biofloc. A minimum of "
+            f"**{CA2_MEQL_FLOC_MIN:.1f}–{CA2_MEQL_FLOC_OPTIMAL:.1f} meq/L Ca²⁺** is required "
+            f"for good settling properties *(Grady, Daigger & Love; Biggs et al. 2001)*. "
+            f"At the recommended dose, GCC contributes **{rec.ca2_meq_recommended:.2f} meq/L Ca²⁺**; "
+            f"at the enhanced dose, **{rec.ca2_meq_enhanced:.2f} meq/L**. "
+            f"NaOH, Mg(OH)₂, and NaHCO₃ contribute zero Ca²⁺.\n\n"
+            "**3. Self-limiting pH buffer**  \n"
+            "CaCO₃ dissolution is governed by carbonate equilibrium — it dissolves in "
+            "proportion to the acidity of the receiving water and stops as pH approaches "
+            "equilibrium (~8.3). It is physically incapable of driving pH above process-safe "
+            "levels. Caustic has no such self-limiting mechanism."
+        )
+
 
 # ── Enhanced justification ────────────────────────────────────────────────────
 
@@ -497,6 +562,55 @@ with st.expander(
         f"Enhanced dose: **{rec.dose_enhanced_mgl:.0f} mg/L** &nbsp;·&nbsp; "
         f"**{mt_enh_mo:.1f} MT/mo** &nbsp;·&nbsp; **${cost_enh_mo:,.0f}/mo** &nbsp;·&nbsp; "
         f"Target residual: {int(ENHANCED_RESIDUAL_ALK)} mg/L as CaCO₃"
+    )
+
+
+# ── Ca²⁺ contribution panel ──────────────────────────────────────────────────
+
+with st.expander("🧪 Ca²⁺ Ion Contribution & Floc Stability", expanded=False):
+    ca_c1, ca_c2, ca_c3 = st.columns(3)
+    ca_c1.metric(
+        "Ca²⁺ at recommended dose",
+        f"{rec.ca2_meq_recommended:.3f} meq/L",
+        help=f"Free Ca²⁺ released by GCC dissolution at {rec.dose_mgl:.0f} mg/L.",
+    )
+    ca_c2.metric(
+        "Ca²⁺ at enhanced dose",
+        f"{rec.ca2_meq_enhanced:.3f} meq/L",
+        help=f"Free Ca²⁺ released at AEM™ enhanced dose of {rec.dose_enhanced_mgl:.0f} mg/L.",
+    )
+    ca_c3.metric(
+        "Literature minimum for stable floc",
+        f"{CA2_MEQL_FLOC_MIN:.1f} meq/L",
+        help="Minimum Ca²⁺ required for stable biofloc settling (Grady, Daigger & Love; Biggs et al. 2001).",
+    )
+    if rec.ca2_meq_enhanced >= CA2_MEQL_FLOC_MIN:
+        st.success(
+            f"✅ At the enhanced dose ({rec.dose_enhanced_mgl:.0f} mg/L), GCC introduces "
+            f"**{rec.ca2_meq_enhanced:.3f} meq/L Ca²⁺** — exceeding the peer-reviewed "
+            f"minimum of {CA2_MEQL_FLOC_MIN:.1f} meq/L required for stable biofloc formation. "
+            f"This provides a quantitative, literature-backed basis for the predicted SVI improvement."
+        )
+    else:
+        st.info(
+            f"At the enhanced dose ({rec.dose_enhanced_mgl:.0f} mg/L), GCC contributes "
+            f"**{rec.ca2_meq_enhanced:.3f} meq/L Ca²⁺** — below the {CA2_MEQL_FLOC_MIN:.1f} meq/L "
+            f"literature threshold for stable floc. Pre-existing Ca²⁺ in the influent "
+            f"(not measured) may supplement this. A direct Ca²⁺ measurement would confirm."
+        )
+    st.caption(
+        "Basis: MW CaCO₃ = 100 g/mol; Ca²⁺ is divalent → 1 mg/L CaCO₃ dissolved = 0.02 meq/L Ca²⁺. "
+        "Source: Grady, Daigger & Love — Biological Wastewater Treatment 3e; Biggs et al. (2001) WST."
+    )
+
+
+# ── Calculation walkthrough ───────────────────────────────────────────────────
+
+with st.expander("📐 Full Calculation Walkthrough", expanded=False):
+    st.markdown(rec.calculation_walkthrough)
+    st.caption(
+        "This walkthrough shows every step used to derive the dose recommendation. "
+        "Share with technical reviewers or include in proposals requiring calculation backup."
     )
 
 
@@ -759,6 +873,58 @@ def build_pdf(
     story.append(Paragraph(f"<i>Method: {r.method}</i>", caption_s))
     story.append(Spacer(1, 8))
 
+    # ── Ca²⁺ contribution ─────────────────────────────────────────────────────
+    story.append(_section_bar("Ca²⁺ ION CONTRIBUTION & FLOC STABILITY", uw))
+    story.append(Spacer(1, 4))
+    ca2_rows = [
+        ["PARAMETER",                         "RECOMMENDED DOSE",                       "AEM™ ENHANCED DOSE"],
+        ["GCC dose",                           f"{r.dose_mgl:.0f} mg/L",                f"{r.dose_enhanced_mgl:.0f} mg/L"],
+        ["Ca²⁺ contribution",                  f"{r.ca2_meq_recommended:.3f} meq/L",     f"{r.ca2_meq_enhanced:.3f} meq/L"],
+        [f"vs. literature min ({CA2_MEQL_FLOC_MIN:.1f} meq/L)",
+         "Below" if r.ca2_meq_recommended < CA2_MEQL_FLOC_MIN else "Meets / Exceeds",
+         "Below" if r.ca2_meq_enhanced < CA2_MEQL_FLOC_MIN else "Meets / Exceeds"],
+    ]
+    ca2_tbl = Table(ca2_rows, colWidths=[uw*0.40, uw*0.30, uw*0.30])
+    ca2_tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, 0),  _LNAVY),
+        ("TEXTCOLOR",     (0, 0), (-1, 0),  _NAVY),
+        ("FONTNAME",      (0, 0), (-1, 0),  _FB),
+        ("FONTSIZE",      (0, 0), (-1, 0),  7),
+        ("FONTNAME",      (0, 1), (0, -1),  _BB),
+        ("FONTNAME",      (1, 1), (-1, -1), _B),
+        ("FONTSIZE",      (0, 1), (-1, -1), 8),
+        ("ALIGN",         (1, 0), (-1, -1), "CENTER"),
+        ("TOPPADDING",    (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+        ("BOX",           (0, 0), (-1, -1), 0.5, _LGRAY),
+        ("INNERGRID",     (0, 0), (-1, -1), 0.3, _LGRAY),
+    ] + _alt_rows(3, _WHITE, _LNAVY)))
+    story.append(ca2_tbl)
+    story.append(Spacer(1, 3))
+    story.append(Paragraph(
+        "Basis: 1 mg/L CaCO₃ dissolved → 0.02 meq/L Ca²⁺ (MW = 100, divalent). "
+        "Literature minimum for stable biofloc: 0.7 meq/L (Grady, Daigger & Love; Biggs et al. 2001). "
+        "Pre-existing influent Ca²⁺ not included — actual contribution may be higher.",
+        caption_s,
+    ))
+    story.append(Spacer(1, 8))
+
+    # ── Temperature risk (if applicable) ─────────────────────────────────────
+    if r.temp_risk_level is not None:
+        story.append(_section_bar("TEMPERATURE / NITRIFICATION RISK ASSESSMENT", uw))
+        story.append(Spacer(1, 4))
+        story.append(Paragraph(
+            f"Risk Level: <b>{r.temp_risk_level}</b> &nbsp;·&nbsp; {r.temp_risk_note}",
+            body_s,
+        ))
+        story.append(Paragraph(
+            f"Assumed SRT: {ASSUMED_SRT_DAYS:.0f} days (conservative BNR reference). "
+            "Confirm actual SRT with facility before finalizing recommendation.",
+            caption_s,
+        ))
+        story.append(Spacer(1, 8))
+
     # ── AEM enhanced justification ────────────────────────────────────────────
     story.append(_section_bar("AEM™ ENHANCED DOSING — PROCESS OPTIMIZATION RATIONALE", uw))
     story.append(Spacer(1, 4))
@@ -782,6 +948,7 @@ def build_pdf(
         irow("Total nitrogen limit",  f"{inp.target_tn_mgl:.1f} mg/L" if inp.target_tn_mgl else None),
         irow("Total phosphorus limit",f"{inp.target_tp_mgl:.1f} mg/L" if inp.target_tp_mgl else None),
         irow("Current SVI",           f"{inp.current_svi_ml_g:.0f} mL/g" if inp.current_svi_ml_g else None),
+        irow("Wastewater temperature",f"{inp.wastewater_temp_c:.1f}°C" if inp.wastewater_temp_c else None),
         irow("Existing chemical",     inp.existing_chemical),
         irow("Existing chem. spend",  f"${inp.existing_chemical_spend_per_month:,.0f}/mo" if inp.existing_chemical_spend_per_month else None),
         irow("GCC product cost",      f"${inp.gcc_cost_per_mt:,.0f} / metric ton"),
