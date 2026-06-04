@@ -46,6 +46,7 @@ from crew_intake_engine import (
     CommercialScenario,
     Confidence,
     FacilityInputs,
+    FlowScenario,
     IntakeRecommendationEngine,
 )
 
@@ -219,17 +220,67 @@ with st.sidebar:
     st.markdown("**Required**")
     st.caption("Flow, GCC cost, and pH are the minimum recommended inputs.")
     flow_mgd = st.number_input(
-        "Flow", min_value=0.1, max_value=500.0, value=5.0,
+        "Average / Normal flow (MGD)", min_value=0.1, max_value=500.0, value=5.0,
         step=0.5, format="%.1f",
-        help="Plant flow in million gallons per day (MGD). Required.",
+        help="Average daily flow in million gallons per day. Required. "
+             "Add dry weather minimum and peak wet weather flows below for a cost band.",
     )
-    st.caption("million gallons / day")
     gcc_cost = st.number_input(
         "GCC product cost ($ / metric ton)",
         min_value=10.0, max_value=1000.0, value=120.0,
         step=10.0, format="%.0f",
         help="Cost of CREW-verified CaCO₃ delivered to site. Required.",
     )
+
+    with st.expander("📊 Flow profile — cost band inputs (optional)"):
+        st.caption(
+            "Enter additional flow conditions to generate a cost range. "
+            "Typical peaking factors: min ~0.5–0.7× avg; peak wet weather ~2–4× avg."
+        )
+        flow_min    = st.number_input(
+            "Dry weather minimum (MGD)", min_value=0.0, max_value=500.0, value=0.0,
+            step=0.1, format="%.1f",
+            help="Lowest sustained daily flow — typically 50–70% of average. "
+                 "If dilution adjustment is on, concentrations will be proportionally higher at this flow.",
+        )
+        flow_peak   = st.number_input(
+            "Peak wet weather (MGD)", min_value=0.0, max_value=2000.0, value=0.0,
+            step=0.5, format="%.1f",
+            help="Maximum flow during wet weather / storm events — typically 200–400% of average. "
+                 "If dilution adjustment is on, I/I dilutes concentrations and reduces dose (mg/L) "
+                 "even as total mass rises.",
+        )
+        flow_design = st.number_input(
+            "Design / permit flow (MGD)", min_value=0.0, max_value=2000.0, value=0.0,
+            step=0.5, format="%.1f",
+            help="Rated or permitted plant capacity. Used to show cost at full build-out. "
+                 "Often equals or exceeds peak wet weather flow.",
+        )
+        apply_dilution = st.checkbox(
+            "Apply concentration dilution / concentration adjustment",
+            value=False,
+            help=(
+                "**What this does:**  \n"
+                "In real wastewater systems, flow variation is driven by infiltration and "
+                "inflow (I/I) during wet weather, and by reduced usage at night and in dry seasons. "
+                "I/I water carries very low pollutant concentrations, so at high flow:\n\n"
+                "- Ammonia and alkalinity concentrations **decrease** proportionally "
+                "(diluted by the additional clean/groundwater volume)\n"
+                "- This **lowers the dose in mg/L** at peak flow, but the higher volume "
+                "may still raise total monthly mass and cost\n\n"
+                "At minimum flow (dry weather), the opposite applies: "
+                "concentrations are **higher**, which can raise the dose (mg/L) and "
+                "partially offset the cost reduction from lower flow.\n\n"
+                "**When to use:** Check this when you have measured wet-weather vs. "
+                "dry-weather concentration data, or want to see the full operational range. "
+                "Leave unchecked for a conservative fixed-concentration estimate."
+            ),
+        )
+
+        # Normalize zero entries to None
+        flow_min    = flow_min    if flow_min    > 0.0 else None
+        flow_peak   = flow_peak   if flow_peak   > 0.0 else None
+        flow_design = flow_design if flow_design > 0.0 else None
 
     st.divider()
 
@@ -328,6 +379,10 @@ with st.sidebar:
 inputs = FacilityInputs(
     flow_mgd                     = flow_mgd,
     gcc_cost_per_mt              = gcc_cost,
+    flow_min_mgd                 = flow_min,
+    flow_peak_mgd                = flow_peak,
+    flow_design_mgd              = flow_design,
+    apply_dilution               = apply_dilution,
     commercial_scenario          = commercial_scenario,
     existing_chemical            = existing_chemical,
     existing_chemical_spend_per_month = existing_spend_per_month,
@@ -362,8 +417,15 @@ cost_enh_mo  = mt_enh_mo  * gcc_cost
 # ── Header ────────────────────────────────────────────────────────────────────
 
 st.title("💧 CREW")
+_flow_label = f"{flow_mgd:.1f} MGD"
+if rec.cost_band_low is not None:
+    _flow_range = sorted(set(
+        s.flow_mgd for s in rec.flow_scenarios
+        if s.label in ("Dry Weather Min", "Peak Wet Weather", "Design Flow", "Average / Normal")
+    ))
+    _flow_label = f"{_flow_range[0]:.1f} – {_flow_range[-1]:.1f} MGD"
 st.markdown(
-    f"**{fname}** &nbsp;·&nbsp; {flow_mgd:.1f} MGD &nbsp;·&nbsp; "
+    f"**{fname}** &nbsp;·&nbsp; {_flow_label} &nbsp;·&nbsp; "
     f"*{commercial_scenario.value}*"
 )
 st.divider()
@@ -374,11 +436,18 @@ st.divider()
 col_hero, col_metrics = st.columns([2, 3], gap="large")
 
 with col_hero:
+    if rec.cost_band_low is not None:
+        _hero_sub = (
+            f"{rec.mass_mt_per_month:.1f} MT/mo @ avg &nbsp;·&nbsp; "
+            f"${rec.cost_band_low:,.0f} – ${rec.cost_band_high:,.0f}/mo range"
+        )
+    else:
+        _hero_sub = f"{rec.mass_mt_per_month:.1f} MT/mo &nbsp;·&nbsp; ${rec.cost_per_month_usd:,.0f}/mo"
     st.markdown(f"""
 <div class="hero-card">
   <div class="hero-label">Recommended GCC Dose</div>
   <div class="hero-value">{rec.dose_mgl:.0f} mg/L</div>
-  <div class="hero-sub">{rec.mass_mt_per_month:.1f} MT/mo &nbsp;·&nbsp; ${rec.cost_per_month_usd:,.0f}/mo</div>
+  <div class="hero-sub">{_hero_sub}</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -463,6 +532,51 @@ if rec.temp_risk_level is not None:
         f"*Basis: Arrhenius θ = 1.072 for AOB; assumed SRT {ASSUMED_SRT_DAYS:.0f} d "
         f"(conservative BNR reference — confirm with facility).*"
     )
+
+
+# ── Flow profile cost projection ──────────────────────────────────────────────
+
+if len(rec.flow_scenarios) > 1:
+    st.divider()
+    st.markdown("#### Flow Profile — Cost Projection")
+    if apply_dilution:
+        st.caption(
+            "Concentration dilution adjustment applied — dose (mg/L) varies by flow condition. "
+            "At peak wet weather, I/I dilutes NH₃ and alkalinity, reducing dose per unit volume "
+            "even as total monthly mass may rise."
+        )
+    else:
+        st.caption(
+            "Fixed concentration assumed across all flow conditions. "
+            "Toggle 'Apply concentration dilution adjustment' in the flow profile inputs "
+            "to see how I/I dilution affects dose and cost at each condition."
+        )
+
+    import pandas as pd
+    _rows = []
+    for s in rec.flow_scenarios:
+        _rows.append({
+            "Flow Condition": s.label,
+            "Flow (MGD)":     f"{s.flow_mgd:.1f}",
+            "Dose (mg/L)":    f"{s.dose_mgl:.0f}",
+            "MT / month":     f"{s.mass_mt_per_month:.1f}",
+            "Cost / month":   f"${s.cost_per_month:,.0f}",
+            "Cost / year":    f"${s.cost_per_month * 12:,.0f}",
+        })
+
+    st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
+
+    if apply_dilution:
+        for s in rec.flow_scenarios:
+            if s.note:
+                st.caption(f"**{s.label}:** {s.note}")
+
+    if rec.cost_band_low is not None:
+        st.info(
+            f"**Cost band: ${rec.cost_band_low:,.0f} – ${rec.cost_band_high:,.0f} / month** "
+            f"(${rec.cost_band_low * 12:,.0f} – ${rec.cost_band_high * 12:,.0f} / year) "
+            f"across entered flow conditions at {rec.dose_mgl:.0f} mg/L recommended dose."
+        )
 
 
 # ── Cost comparison (replacement scenario) ────────────────────────────────────
@@ -815,6 +929,61 @@ def build_pdf(
     ]))
     story.append(band_tbl)
     story.append(Spacer(1, 10))
+
+    # ── Flow profile cost band ────────────────────────────────────────────────
+    if len(r.flow_scenarios) > 1:
+        story.append(_section_bar("FLOW PROFILE — COST PROJECTION", uw))
+        story.append(Spacer(1, 4))
+
+        fp_header = ["FLOW CONDITION", "FLOW (MGD)", "DOSE (mg/L)", "MT / MO", "COST / MO", "COST / YR"]
+        fp_data   = [fp_header]
+        for s in r.flow_scenarios:
+            fp_data.append([
+                s.label,
+                f"{s.flow_mgd:.1f}",
+                f"{s.dose_mgl:.0f}",
+                f"{s.mass_mt_per_month:.1f}",
+                f"${s.cost_per_month:,.0f}",
+                f"${s.cost_per_month * 12:,.0f}",
+            ])
+
+        cw_fp = [uw*0.24, uw*0.12, uw*0.13, uw*0.12, uw*0.18, uw*0.21]
+        fp_tbl = Table(fp_data, colWidths=cw_fp)
+        fp_style = [
+            ("BACKGROUND",    (0, 0), (-1, 0),  _LNAVY),
+            ("TEXTCOLOR",     (0, 0), (-1, 0),  _NAVY),
+            ("FONTNAME",      (0, 0), (-1, 0),  _FB),
+            ("FONTSIZE",      (0, 0), (-1, 0),  7),
+            ("FONTNAME",      (0, 1), (-1, -1), _B),
+            ("FONTSIZE",      (0, 1), (-1, -1), 8),
+            ("ALIGN",         (1, 0), (-1, -1), "CENTER"),
+            ("TOPPADDING",    (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 4),
+            ("BOX",           (0, 0), (-1, -1), 0.5, _LGRAY),
+            ("INNERGRID",     (0, 0), (-1, -1), 0.3, _LGRAY),
+        ]
+        # Bold + highlight the Average row
+        for i, s in enumerate(r.flow_scenarios, start=1):
+            if s.label == "Average / Normal":
+                fp_style += [
+                    ("BACKGROUND", (0, i), (-1, i), _LNAVY),
+                    ("FONTNAME",   (0, i), (-1, i), _BB),
+                    ("TEXTCOLOR",  (0, i), (-1, i), _NAVY),
+                ]
+        fp_tbl.setStyle(TableStyle(fp_style))
+        story.append(fp_tbl)
+        story.append(Spacer(1, 3))
+
+        if r.cost_band_low is not None:
+            story.append(Paragraph(
+                f"Cost band: <b>${r.cost_band_low:,.0f} – ${r.cost_band_high:,.0f} / month</b> "
+                f"(${r.cost_band_low*12:,.0f} – ${r.cost_band_high*12:,.0f} / year) "
+                f"at {r.dose_mgl:.0f} mg/L recommended dose across entered flow conditions."
+                + (" Concentration dilution adjustment applied." if inp.apply_dilution else ""),
+                caption_s,
+            ))
+        story.append(Spacer(1, 8))
 
     # ── Cost comparison (replacement only) ────────────────────────────────────
     if (inp.commercial_scenario == CommercialScenario.ALKALINITY_REPLACEMENT

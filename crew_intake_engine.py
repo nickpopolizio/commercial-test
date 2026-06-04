@@ -72,8 +72,14 @@ class FacilityInputs:
     All water quality and operational fields are optional.
     """
     # Required
-    flow_mgd: float
+    flow_mgd: float           # average / normal flow
     gcc_cost_per_mt: float
+
+    # Flow profile (optional — drives cost band)
+    flow_min_mgd: float | None    = None   # dry weather minimum
+    flow_peak_mgd: float | None   = None   # peak wet weather
+    flow_design_mgd: float | None = None   # design / permit capacity
+    apply_dilution: bool          = False  # scale concentrations with flow
 
     # Commercial scenario
     commercial_scenario: CommercialScenario = CommercialScenario.ALKALINITY_REPLACEMENT
@@ -129,6 +135,11 @@ class DoseRecommendation:
     assumptions: list[str]
     data_score: int
 
+    # Flow profile cost scenarios
+    flow_scenarios: list = field(default_factory=list)   # list of FlowScenario
+    cost_band_low: float | None  = None
+    cost_band_high: float | None = None
+
     # Ca²⁺ contribution (meq/L) at each dose band
     ca2_meq_recommended: float = 0.0
     ca2_meq_enhanced: float    = 0.0
@@ -143,6 +154,17 @@ class DoseRecommendation:
     # Replacement scenario cost comparison (None when not applicable)
     cost_delta_per_month: float | None = None   # positive = GCC is cheaper
     existing_chem_has_overdose_risk: bool = False
+
+
+@dataclass
+class FlowScenario:
+    label: str
+    flow_mgd: float
+    dose_mgl: float
+    mass_mt_per_month: float
+    cost_per_month: float
+    dilution_factor: float = 1.0   # actual conc. relative to average (>1 = concentrated, <1 = diluted)
+    note: str = ""
 
 
 # ── Recommendation engine ─────────────────────────────────────────────────────
@@ -208,6 +230,24 @@ class IntakeRecommendationEngine:
         ca2_rec = round(dose     * eff * CA2_MEQL_PER_MGL_CACO3, 3)
         ca2_enh = round(dose_enhanced * eff * CA2_MEQL_PER_MGL_CACO3, 3)
 
+        # ── Flow profile scenarios ────────────────────────────────────────────
+        _flow_map = [
+            ("Dry Weather Min",   self.inp.flow_min_mgd),
+            ("Average / Normal",  self.inp.flow_mgd),
+            ("Peak Wet Weather",  self.inp.flow_peak_mgd),
+            ("Design Flow",       self.inp.flow_design_mgd),
+        ]
+        scenarios: list[FlowScenario] = []
+        for _label, _flow in _flow_map:
+            if _flow is None:
+                continue
+            scenarios.append(
+                self._compute_scenario(_label, _flow, influent_alk, net_alk_demand, dose)
+            )
+        _costs = [s.cost_per_month for s in scenarios]
+        cost_band_low  = min(_costs) if len(_costs) > 1 else None
+        cost_band_high = max(_costs) if len(_costs) > 1 else None
+
         # ── Temperature risk ──────────────────────────────────────────────────
         t_risk_level: str | None = None
         t_risk_note: str = ""
@@ -258,6 +298,9 @@ class IntakeRecommendationEngine:
             calculation_walkthrough  = walkthrough,
             cost_delta_per_month     = cost_delta,
             existing_chem_has_overdose_risk = overdose_risk,
+            flow_scenarios           = scenarios,
+            cost_band_low            = cost_band_low,
+            cost_band_high           = cost_band_high,
         )
 
     # ── Temperature / nitrification risk assessment ───────────────────────────
@@ -507,6 +550,76 @@ class IntakeRecommendationEngine:
         w(f"*Site-specific sampling is recommended before implementation.*")
 
         return "\n".join(lines)
+
+    # ── Flow scenario computation ─────────────────────────────────────────────
+
+    def _compute_scenario(
+        self,
+        label: str,
+        flow_mgd: float,
+        base_influent_alk: float,
+        base_net_alk_demand: float,
+        base_dose: float,
+    ) -> FlowScenario:
+        """
+        Compute mass and cost at a given flow condition.
+        If apply_dilution is True, concentrations scale proportionally:
+          - Peak flow > avg → concentrations diluted (I/I effect)
+          - Min flow < avg → concentrations concentrated (dry weather)
+        Dilution factor = avg_flow / scenario_flow (applied to NH₃ and alkalinity).
+        """
+        inp = self.inp
+        avg = inp.flow_mgd
+        df  = avg / flow_mgd   # >1 at min flow (concentrated), <1 at peak (diluted)
+
+        if inp.apply_dilution and abs(df - 1.0) > 0.01:
+            # Scale concentrations and re-derive the chemistry
+            sc_nh3 = (inp.influent_nh3_mgl or ASSUMED_INFLUENT_NH3) * df
+            sc_alk = base_influent_alk * df
+
+            sc_nh3_target = inp.target_nh3_mgl
+            if sc_nh3_target is None and inp.target_tn_mgl is not None:
+                sc_nh3_target = min(sc_nh3 * 0.1, 3.0)
+            if sc_nh3_target is None:
+                sc_nh3_target = 3.0
+
+            sc_nh3_removed  = max(0.0, sc_nh3 - sc_nh3_target)
+            sc_alk_consumed = sc_nh3_removed * ALK_CONSUMED_PER_NH3
+
+            sc_no3 = inp.target_no3_mgl
+            if sc_no3 is None and inp.target_tn_mgl is not None:
+                sc_no3 = max(0.0, inp.target_tn_mgl - sc_nh3_target)
+            sc_alk_recovered = 0.0
+            if sc_no3 is not None:
+                sc_alk_recovered = max(0.0, sc_nh3_removed - sc_no3) * ALK_RECOVERED_PER_NO3
+
+            sc_net_demand = max(0.0, sc_alk_consumed - sc_alk_recovered)
+            sc_deficit    = sc_net_demand - (sc_alk - inp.target_residual_alk_mgl)
+            sc_dose       = max(0.0, min(300.0, sc_deficit / inp.dissolution_efficiency))
+
+            pct = round((df - 1.0) * 100)
+            direction = "concentrated" if df > 1 else "diluted"
+            note = (
+                f"Concentrations {direction} {abs(pct):.0f}% vs. average "
+                f"(dilution factor {df:.2f}×) — dose adjusted to {sc_dose:.0f} mg/L"
+            )
+        else:
+            sc_dose = base_dose
+            note    = "" if abs(df - 1.0) < 0.01 else "Fixed concentration (dilution adjustment off)"
+            df      = 1.0
+
+        mass_mo  = sc_dose * flow_mgd * _MT_PER_DAY_FACTOR * _DAYS_PER_MONTH
+        cost_mo  = mass_mo * inp.gcc_cost_per_mt
+
+        return FlowScenario(
+            label            = label,
+            flow_mgd         = flow_mgd,
+            dose_mgl         = round(sc_dose, 1),
+            mass_mt_per_month= round(mass_mo, 2),
+            cost_per_month   = round(cost_mo, 0),
+            dilution_factor  = round(df, 3),
+            note             = note,
+        )
 
     # ── Nitrogen demand ───────────────────────────────────────────────────────
 
