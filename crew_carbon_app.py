@@ -1,5 +1,5 @@
 """
-CREW — Facility Intake & Evaluation
+CREW — Plant Intake & Evaluation
 Run with: streamlit run crew_carbon_app.py
 Requires: pip install streamlit reportlab
 """
@@ -42,12 +42,14 @@ from crew_intake_engine import (
     CA2_MEQL_FLOC_OPTIMAL,
     ENHANCED_RESIDUAL_ALK,
     MIN_RESIDUAL_ALK,
+    ORTHO_P_FRACTION_OF_TP,
     TARGET_RESIDUAL_ALK,
     CommercialScenario,
     Confidence,
-    FacilityInputs,
     FlowScenario,
     IntakeRecommendationEngine,
+    PhosphorusForm,
+    PlantInputs,
 )
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -170,10 +172,10 @@ def _band_card(label: str, dose: float, mt_mo: float, cost_mo: float, color: str
 
 with st.sidebar:
     st.markdown("## 💧 CREW")
-    st.caption("Facility Intake & Evaluation")
+    st.caption("Plant Intake & Evaluation")
     st.divider()
 
-    facility_name = st.text_input("Facility name", value="", placeholder="e.g. Riverside WWTP")
+    plant_name = st.text_input("Plant name", value="", placeholder="e.g. Riverside WWTP")
 
     # ── Commercial scenario ───────────────────────────────────────────────────
     st.markdown("**Commercial opportunity**")
@@ -182,10 +184,10 @@ with st.sidebar:
         options=[s.value for s in CommercialScenario],
         label_visibility="collapsed",
         help=(
-            "Alkalinity Replacement: facility currently doses another alkalinity chemical and "
+            "Alkalinity Replacement: the plant currently doses another alkalinity chemical and "
             "wants to evaluate switching to GCC. "
-            "Process Optimization: facility wants to use AEM™ to improve BNR, settleability, "
-            "and pH stability."
+            "Process Optimization: the plant wants to use AEM™ to improve biological nutrient "
+            "removal (BNR), settling, and pH stability."
         ),
     )
     commercial_scenario = CommercialScenario(scenario_label)
@@ -296,9 +298,41 @@ with st.sidebar:
         influent_no3 = _opt("Nitrate, NO₃-N",
             help="Incoming nitrate nitrogen. "
                  "If not provided: no denitrification alkalinity credit is applied — conservative.")
-        influent_p   = _opt("Ortho-phosphorus, PO₄",
-            help="Incoming orthophosphate. "
-                 "If not provided: phosphorus is not factored into alkalinity demand.")
+
+        st.markdown("**Influent phosphorus**")
+        influent_p_form_label = st.radio(
+            "Phosphorus reported as",
+            options=[f.value for f in PhosphorusForm],
+            horizontal=True,
+            help=(
+                "Select how phosphorus is reported on your lab sheet. Total Phosphorus (TP) "
+                "includes orthophosphate, polyphosphate, and organic phosphorus. "
+                "Orthophosphate (ortho-P) is the soluble, reactive form only."
+            ),
+        )
+        influent_p_form = PhosphorusForm(influent_p_form_label)
+        _p_input_label = "Total phosphorus, TP" if influent_p_form == PhosphorusForm.TOTAL else "Orthophosphate, ortho-P"
+        influent_p = _opt(_p_input_label, unit="mg/L as P",
+            help="Incoming phosphorus, in the form selected above. "
+                 "Recorded for the plant profile — phosphorus does not change the GCC dose "
+                 "recommendation, which is based on the alkalinity and nitrogen balance below. "
+                 "If not provided: phosphorus is omitted from the report.")
+        if influent_p is not None:
+            if influent_p_form == PhosphorusForm.TOTAL:
+                _ortho_est = influent_p * ORTHO_P_FRACTION_OF_TP
+                st.caption(
+                    f"ℹ️ In typical municipal wastewater, about {ORTHO_P_FRACTION_OF_TP*100:.0f}% "
+                    f"of TP is orthophosphate (WEF Treatment Fundamentals I, Ch. 9). "
+                    f"Estimated influent orthophosphate ≈ {influent_p:.1f} × "
+                    f"{ORTHO_P_FRACTION_OF_TP:.2f} = **{_ortho_est:.1f} mg/L as P**. "
+                    f"This does not change the GCC dose above."
+                )
+            else:
+                st.caption(
+                    "ℹ️ Orthophosphate entered directly — recorded for the plant profile. "
+                    "This does not change the GCC dose above."
+                )
+
         influent_ph  = _opt("pH", unit="",
             help="Incoming wastewater pH (0–14). Recommended minimum input. "
                  "If not provided and alkalinity is also blank: 150 mg/L alkalinity is assumed. "
@@ -307,7 +341,7 @@ with st.sidebar:
             help="Average mixed liquor or influent temperature. "
                  "Used to assess nitrification reliability via Arrhenius correction (θ = 1.072). "
                  "If not provided: temperature risk assessment is skipped. "
-                 "Critical for cold-climate or seasonal facilities.")
+                 "Important for cold-climate or seasonal plants.")
         influent_alk = _opt("Alkalinity",
             help="Total alkalinity as CaCO₃ (mg/L). Highest-value single data point. "
                  "If not provided: estimated from pH if available, otherwise 150 mg/L is assumed. "
@@ -357,7 +391,7 @@ with st.sidebar:
         residual_target  = st.slider(
             "Target residual alkalinity (mg/L as CaCO₃)",
             int(MIN_RESIDUAL_ALK), 200, int(TARGET_RESIDUAL_ALK), 5,
-            help="Minimum residual alkalinity to maintain in the bioreactor. "
+            help="Minimum residual alkalinity to maintain in the aeration basin. "
                  "50 mg/L = hard safety floor (nitrification protection). "
                  "75 mg/L = standard design target. "
                  "120+ mg/L = AEM™ enhanced optimization range. "
@@ -369,14 +403,14 @@ with st.sidebar:
     client_logo_file = st.file_uploader(
         "Client / utility logo (optional)",
         type=["png", "jpg", "jpeg"],
-        help="Upload the facility or operator logo to include on the PDF report.",
+        help="Upload the plant or operator logo to include on the PDF report.",
     )
     client_logo_bytes: bytes | None = client_logo_file.read() if client_logo_file else None
 
 
 # ── Run engine ────────────────────────────────────────────────────────────────
 
-inputs = FacilityInputs(
+inputs = PlantInputs(
     flow_mgd                     = flow_mgd,
     gcc_cost_per_mt              = gcc_cost,
     flow_min_mgd                 = flow_min,
@@ -389,7 +423,8 @@ inputs = FacilityInputs(
     influent_nh3_mgl             = influent_nh3,
     influent_no2_mgl             = influent_no2,
     influent_no3_mgl             = influent_no3,
-    influent_ortho_p_mgl         = influent_p,
+    influent_p_mgl               = influent_p,
+    influent_p_form              = influent_p_form,
     influent_ph                  = influent_ph,
     influent_alkalinity_mgl      = influent_alk,
     wastewater_temp_c            = wastewater_temp,
@@ -404,7 +439,7 @@ inputs = FacilityInputs(
 )
 
 rec   = IntakeRecommendationEngine(inputs).recommend()
-fname = facility_name.strip() or "Facility"
+fname = plant_name.strip() or "Plant"
 
 # Precompute monthly values for min and enhanced bands
 _f   = inputs.flow_mgd * 3.785412e-3 * 30.44   # flow × unit factor × days/month
@@ -516,6 +551,14 @@ st.caption(
 )
 
 
+# ── Phosphorus profile ────────────────────────────────────────────────────────
+
+if rec.phosphorus_note:
+    st.divider()
+    st.markdown("#### Phosphorus Profile")
+    st.info(rec.phosphorus_note)
+
+
 # ── Temperature / nitrification risk ─────────────────────────────────────────
 
 if rec.temp_risk_level is not None:
@@ -530,7 +573,7 @@ if rec.temp_risk_level is not None:
         f"{_icon} **Nitrification Risk at {wastewater_temp:.0f}°C — {rec.temp_risk_level}**\n\n"
         f"{rec.temp_risk_note}\n\n"
         f"*Basis: Arrhenius θ = 1.072 for AOB; assumed SRT {ASSUMED_SRT_DAYS:.0f} d "
-        f"(conservative BNR reference — confirm with facility).*"
+        f"(conservative reference — confirm against actual plant operating data).*"
     )
 
 
@@ -630,38 +673,39 @@ if commercial_scenario == CommercialScenario.ALKALINITY_REPLACEMENT and existing
     if rec.existing_chem_has_overdose_risk:
         st.warning(
             f"⚠️ **Process Risk — {existing_chemical}:**  "
-            f"Hydroxide-based chemicals react instantaneously and can drive localized pH to "
-            f"≥10 at the feed point, detrimentally affecting nitrifying bacteria "
-            f"*(WEF MOP OM-9)*. CaCO₃ is self-limiting — dissolution stops as pH rises "
-            f"toward equilibrium, eliminating the risk of biological process upset from "
+            f"Hydroxide-based chemicals react instantaneously and can drive localized pH well "
+            f"above the 6.5–8.0 range in which nitrifying bacteria remain active "
+            f"(WEF Treatment Fundamentals). CaCO₃ is self-limiting — dissolution slows as pH "
+            f"rises toward carbonate equilibrium, reducing the risk of a process upset from "
             f"overdosing. This process risk is not captured in the cost comparison above."
         )
 
-    # DIC / mechanistic differentiation
+    # Mechanistic differentiation
     with st.expander("🔬 Why CaCO₃ is more than an alkalinity source", expanded=False):
         st.markdown(
             "Unlike caustic soda, magnesium hydroxide, or lime, CREW's soluble CaCO₃ "
-            "delivers **three simultaneous mechanisms** that hydroxide-only sources cannot:\n\n"
-            "**1. Dissolved Inorganic Carbon (DIC) — nitrifier carbon source**  \n"
-            "Autotrophic ammonia-oxidizing (AOB) and nitrite-oxidizing (NOB) bacteria use "
-            "bicarbonate as their carbon source for biomass synthesis — not organic carbon. "
-            "CaCO₃ dissolution releases bicarbonate directly into the mixed liquor, feeding "
-            "nitrifiers. NaOH adds OH⁻ only; it provides no inorganic carbon. At equivalent "
-            "alkalinity equivalents, CaCO₃ sustains nitrifier growth where caustic cannot "
-            "*(Metcalf & Eddy 5e; WEF Treatment Fundamentals)*.\n\n"
-            "**2. Free Ca²⁺ ions — floc bridging and settleability**  \n"
-            f"Ca²⁺ ions act as electrostatic bridges between negatively charged cell surfaces "
-            f"and extracellular polymers, forming stable biofloc. A minimum of "
-            f"**{CA2_MEQL_FLOC_MIN:.1f}–{CA2_MEQL_FLOC_OPTIMAL:.1f} meq/L Ca²⁺** is required "
-            f"for good settling properties *(Grady, Daigger & Love; Biggs et al. 2001)*. "
+            "delivers **three simultaneous benefits** that hydroxide-only sources cannot:\n\n"
+            "**1. Inorganic carbon — a nitrifier carbon source**  \n"
+            "Ammonia-oxidizing (AOB) and nitrite-oxidizing (NOB) bacteria are autotrophs: "
+            "they use carbonate and bicarbonate — inorganic carbon, measured as alkalinity — "
+            "as their carbon source for cell growth, not organic carbon. CaCO₃ dissolution "
+            "releases bicarbonate directly into the mixed liquor, supplying this carbon source. "
+            "NaOH adds hydroxide only and supplies no inorganic carbon. At equivalent "
+            "alkalinity, CaCO₃ supports nitrifier growth in a way that caustic alone cannot "
+            "*(WEF Treatment Fundamentals; Metcalf & Eddy 5e)*.\n\n"
+            "**2. Free Ca²⁺ ions — floc formation and settling**  \n"
+            f"CaCO₃ dissolution releases free Ca²⁺ ions, which support floc formation and "
+            f"settling. The **{CA2_MEQL_FLOC_MIN:.1f}–{CA2_MEQL_FLOC_OPTIMAL:.1f} meq/L Ca²⁺** "
+            f"range is associated with good settling properties "
+            f"*(Grady, Daigger & Love; Biggs et al. 2001)*. "
             f"At the recommended dose, GCC contributes **{rec.ca2_meq_recommended:.2f} meq/L Ca²⁺**; "
             f"at the enhanced dose, **{rec.ca2_meq_enhanced:.2f} meq/L**. "
-            f"NaOH, Mg(OH)₂, and NaHCO₃ contribute zero Ca²⁺.\n\n"
+            f"NaOH, Mg(OH)₂, and NaHCO₃ contribute no Ca²⁺.\n\n"
             "**3. Self-limiting pH buffer**  \n"
             "CaCO₃ dissolution is governed by carbonate equilibrium — it dissolves in "
-            "proportion to the acidity of the receiving water and stops as pH approaches "
-            "equilibrium (~8.3). It is physically incapable of driving pH above process-safe "
-            "levels. Caustic has no such self-limiting mechanism."
+            "proportion to the acidity of the surrounding water and slows as pH approaches "
+            "equilibrium (~8.3). It cannot drive pH above process-safe levels the way a "
+            "hydroxide-based chemical can if overdosed."
         )
 
 
@@ -681,7 +725,7 @@ with st.expander(
 
 # ── Ca²⁺ contribution panel ──────────────────────────────────────────────────
 
-with st.expander("🧪 Ca²⁺ Ion Contribution & Floc Stability", expanded=False):
+with st.expander("🧪 Ca²⁺ Ion Contribution & Floc Settling", expanded=False):
     ca_c1, ca_c2, ca_c3 = st.columns(3)
     ca_c1.metric(
         "Ca²⁺ at recommended dose",
@@ -694,23 +738,24 @@ with st.expander("🧪 Ca²⁺ Ion Contribution & Floc Stability", expanded=Fals
         help=f"Free Ca²⁺ released at AEM™ enhanced dose of {rec.dose_enhanced_mgl:.0f} mg/L.",
     )
     ca_c3.metric(
-        "Literature minimum for stable floc",
-        f"{CA2_MEQL_FLOC_MIN:.1f} meq/L",
-        help="Minimum Ca²⁺ required for stable biofloc settling (Grady, Daigger & Love; Biggs et al. 2001).",
+        "Range for good floc settling",
+        f"{CA2_MEQL_FLOC_MIN:.1f}–{CA2_MEQL_FLOC_OPTIMAL:.1f} meq/L",
+        help="Range associated with good floc settling (Grady, Daigger & Love; Biggs et al. 2001).",
     )
     if rec.ca2_meq_enhanced >= CA2_MEQL_FLOC_MIN:
         st.success(
             f"✅ At the enhanced dose ({rec.dose_enhanced_mgl:.0f} mg/L), GCC introduces "
-            f"**{rec.ca2_meq_enhanced:.3f} meq/L Ca²⁺** — exceeding the peer-reviewed "
-            f"minimum of {CA2_MEQL_FLOC_MIN:.1f} meq/L required for stable biofloc formation. "
-            f"This provides a quantitative, literature-backed basis for the predicted SVI improvement."
+            f"**{rec.ca2_meq_enhanced:.3f} meq/L Ca²⁺** — within or above the "
+            f"{CA2_MEQL_FLOC_MIN:.1f}–{CA2_MEQL_FLOC_OPTIMAL:.1f} meq/L range associated with "
+            f"good floc settling. This provides a quantitative, literature-backed basis for "
+            f"the predicted SVI improvement."
         )
     else:
         st.info(
             f"At the enhanced dose ({rec.dose_enhanced_mgl:.0f} mg/L), GCC contributes "
             f"**{rec.ca2_meq_enhanced:.3f} meq/L Ca²⁺** — below the {CA2_MEQL_FLOC_MIN:.1f} meq/L "
-            f"literature threshold for stable floc. Pre-existing Ca²⁺ in the influent "
-            f"(not measured) may supplement this. A direct Ca²⁺ measurement would confirm."
+            f"lower end of the range associated with good floc settling. Pre-existing Ca²⁺ in "
+            f"the influent (not measured) may supplement this. A direct Ca²⁺ measurement would confirm."
         )
     st.caption(
         "Basis: MW CaCO₃ = 100 g/mol; Ca²⁺ is divalent → 1 mg/L CaCO₃ dissolved = 0.02 meq/L Ca²⁺. "
@@ -793,7 +838,7 @@ def _section_bar(label: str, uw: float) -> Table:
 
 def build_pdf(
     fname: str,
-    inp: FacilityInputs,
+    inp: PlantInputs,
     r,
     mt_min_mo: float,
     mt_enh_mo: float,
@@ -857,7 +902,7 @@ def build_pdf(
     # ── Title ─────────────────────────────────────────────────────────────────
     scenario_tag = inp.commercial_scenario.value
     story.append(Paragraph(
-        f"Alkalinity-Enhanced Mode™ &nbsp;|&nbsp; {scenario_tag} &nbsp;|&nbsp; Facility Evaluation",
+        f"Alkalinity-Enhanced Mode™ &nbsp;|&nbsp; {scenario_tag} &nbsp;|&nbsp; Plant Evaluation",
         S("ti", fontName=_FB, fontSize=13, textColor=_NAVY, spaceAfter=2),
     ))
     story.append(HRFlowable(width="100%", thickness=0.5, color=_LGRAY, spaceAfter=8))
@@ -1043,15 +1088,15 @@ def build_pdf(
     story.append(Spacer(1, 8))
 
     # ── Ca²⁺ contribution ─────────────────────────────────────────────────────
-    story.append(_section_bar("Ca²⁺ ION CONTRIBUTION & FLOC STABILITY", uw))
+    story.append(_section_bar("Ca²⁺ ION CONTRIBUTION & FLOC SETTLING", uw))
     story.append(Spacer(1, 4))
     ca2_rows = [
         ["PARAMETER",                         "RECOMMENDED DOSE",                       "AEM™ ENHANCED DOSE"],
         ["GCC dose",                           f"{r.dose_mgl:.0f} mg/L",                f"{r.dose_enhanced_mgl:.0f} mg/L"],
         ["Ca²⁺ contribution",                  f"{r.ca2_meq_recommended:.3f} meq/L",     f"{r.ca2_meq_enhanced:.3f} meq/L"],
-        [f"vs. literature min ({CA2_MEQL_FLOC_MIN:.1f} meq/L)",
-         "Below" if r.ca2_meq_recommended < CA2_MEQL_FLOC_MIN else "Meets / Exceeds",
-         "Below" if r.ca2_meq_enhanced < CA2_MEQL_FLOC_MIN else "Meets / Exceeds"],
+        [f"vs. floc settling range ({CA2_MEQL_FLOC_MIN:.1f}–{CA2_MEQL_FLOC_OPTIMAL:.1f} meq/L)",
+         "Below" if r.ca2_meq_recommended < CA2_MEQL_FLOC_MIN else "Within or above",
+         "Below" if r.ca2_meq_enhanced < CA2_MEQL_FLOC_MIN else "Within or above"],
     ]
     ca2_tbl = Table(ca2_rows, colWidths=[uw*0.40, uw*0.30, uw*0.30])
     ca2_tbl.setStyle(TableStyle([
@@ -1072,9 +1117,10 @@ def build_pdf(
     story.append(ca2_tbl)
     story.append(Spacer(1, 3))
     story.append(Paragraph(
-        "Basis: 1 mg/L CaCO₃ dissolved → 0.02 meq/L Ca²⁺ (MW = 100, divalent). "
-        "Literature minimum for stable biofloc: 0.7 meq/L (Grady, Daigger & Love; Biggs et al. 2001). "
-        "Pre-existing influent Ca²⁺ not included — actual contribution may be higher.",
+        f"Basis: 1 mg/L CaCO₃ dissolved → 0.02 meq/L Ca²⁺ (MW = 100, divalent). "
+        f"Range associated with good floc settling: {CA2_MEQL_FLOC_MIN:.1f}–{CA2_MEQL_FLOC_OPTIMAL:.1f} meq/L "
+        f"(Grady, Daigger & Love; Biggs et al. 2001). "
+        f"Pre-existing influent Ca²⁺ not included — actual contribution may be higher.",
         caption_s,
     ))
     story.append(Spacer(1, 8))
@@ -1088,8 +1134,8 @@ def build_pdf(
             body_s,
         ))
         story.append(Paragraph(
-            f"Assumed SRT: {ASSUMED_SRT_DAYS:.0f} days (conservative BNR reference). "
-            "Confirm actual SRT with facility before finalizing recommendation.",
+            f"Assumed SRT: {ASSUMED_SRT_DAYS:.0f} days (conservative reference). "
+            "Confirm actual SRT against plant operating data before finalizing recommendation.",
             caption_s,
         ))
         story.append(Spacer(1, 8))
@@ -1111,7 +1157,8 @@ def build_pdf(
         irow("Influent NH₃-N",        f"{inp.influent_nh3_mgl:.1f} mg/L" if inp.influent_nh3_mgl else None),
         irow("Influent NO₂-N",        f"{inp.influent_no2_mgl:.1f} mg/L" if inp.influent_no2_mgl else None),
         irow("Influent NO₃-N",        f"{inp.influent_no3_mgl:.1f} mg/L" if inp.influent_no3_mgl else None),
-        irow("Influent ortho-P",      f"{inp.influent_ortho_p_mgl:.1f} mg/L" if inp.influent_ortho_p_mgl else None),
+        irow("Influent phosphorus",   f"{inp.influent_p_mgl:.1f} mg/L as P ({inp.influent_p_form.value})" if inp.influent_p_mgl else None),
+        irow("Est. influent ortho-P", f"{r.influent_ortho_p_mgl:.1f} mg/L as P" if r.influent_ortho_p_mgl else None),
         irow("Effluent NH₃-N limit",  f"{inp.target_nh3_mgl:.1f} mg/L" if inp.target_nh3_mgl else None),
         irow("Effluent NO₃-N limit",  f"{inp.target_no3_mgl:.1f} mg/L" if inp.target_no3_mgl else None),
         irow("Total nitrogen limit",  f"{inp.target_tn_mgl:.1f} mg/L" if inp.target_tn_mgl else None),

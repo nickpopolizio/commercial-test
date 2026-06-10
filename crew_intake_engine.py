@@ -1,6 +1,6 @@
 """
-CREW — Facility Intake Engine
-Given any subset of facility measurements and permit limits, selects the
+CREW — Plant Intake Engine
+Given any subset of plant water-quality data and permit limits, selects the
 highest-confidence calculation path and returns a GCC dose recommendation.
 """
 from __future__ import annotations
@@ -21,11 +21,17 @@ ASSUMED_INFLUENT_ALK: float   = 150.0   # mg/L as CaCO₃ — typical municipal
 _MT_PER_DAY_FACTOR: float     = 3.785412e-3   # dose_mgl × flow_mgd → MT/day
 _DAYS_PER_MONTH: float        = 30.44
 
-# ── Ca²⁺ floc stability thresholds (Grady et al.; Biggs et al. 2001) ──────────
+# ── Ca²⁺ contribution to floc settling (Grady et al.; Biggs et al. 2001) ──────
 # 1 mg/L CaCO₃ dissolved → 1/100 mmol/L Ca²⁺ → 0.02 meq/L Ca²⁺ (divalent)
 CA2_MEQL_PER_MGL_CACO3: float = 0.02   # meq/L Ca²⁺ per mg/L CaCO₃ dissolved
-CA2_MEQL_FLOC_MIN: float      = 0.7    # meq/L — minimum for stable biofloc
-CA2_MEQL_FLOC_OPTIMAL: float  = 2.0    # meq/L — optimal settling range (upper)
+CA2_MEQL_FLOC_MIN: float      = 0.7    # meq/L — lower end of the range associated with good settling
+CA2_MEQL_FLOC_OPTIMAL: float  = 2.0    # meq/L — upper end of the favorable settling range
+
+# ── Influent phosphorus composition (WEF Treatment Fundamentals I, Ch. 9) ──────
+# Of total influent phosphorus, ~50% is orthophosphate (the soluble, reactive
+# form); the remainder is polyphosphate (~33%) and organic phosphorus (~15%),
+# most of which converts to orthophosphate during biological treatment.
+ORTHO_P_FRACTION_OF_TP: float = 0.50
 
 # ── Nitrification kinetics for temperature assessment ──────────────────────────
 # Conservative fixed SRT assumption — most municipal BNR plants exceed this
@@ -63,12 +69,18 @@ class CommercialScenario(str, Enum):
     PROCESS_OPTIMIZATION   = "Process Optimization"
 
 
+class PhosphorusForm(str, Enum):
+    """How influent phosphorus was reported on the lab sheet."""
+    TOTAL = "Total Phosphorus (TP)"
+    ORTHO = "Orthophosphate (ortho-P)"
+
+
 # ── Data containers ───────────────────────────────────────────────────────────
 
 @dataclass
-class FacilityInputs:
+class PlantInputs:
     """
-    Intake form. Only flow_mgd and gcc_cost_per_mt are required.
+    Plant data intake form. Only flow_mgd and gcc_cost_per_mt are required.
     All water quality and operational fields are optional.
     """
     # Required
@@ -90,7 +102,8 @@ class FacilityInputs:
     influent_nh3_mgl: float | None = None
     influent_no2_mgl: float | None = None
     influent_no3_mgl: float | None = None
-    influent_ortho_p_mgl: float | None = None
+    influent_p_mgl: float | None = None
+    influent_p_form: PhosphorusForm = PhosphorusForm.TOTAL
     influent_ph: float | None = None
     influent_alkalinity_mgl: float | None = None
     wastewater_temp_c: float | None = None   # °C — for nitrification risk assessment
@@ -155,6 +168,10 @@ class DoseRecommendation:
     cost_delta_per_month: float | None = None   # positive = GCC is cheaper
     existing_chem_has_overdose_risk: bool = False
 
+    # Phosphorus profile (informational — not part of the dose calculation)
+    influent_ortho_p_mgl: float | None = None   # estimated reactive orthophosphate, mg/L as P
+    phosphorus_note: str = ""
+
 
 @dataclass
 class FlowScenario:
@@ -184,7 +201,7 @@ class IntakeRecommendationEngine:
       F  Conservative default           — flow & cost only
     """
 
-    def __init__(self, inputs: FacilityInputs) -> None:
+    def __init__(self, inputs: PlantInputs) -> None:
         self.inp = inputs
 
     # ── Public ────────────────────────────────────────────────────────────────
@@ -267,12 +284,15 @@ class IntakeRecommendationEngine:
             if inp.existing_chemical else False
         )
 
+        # ── Phosphorus profile ─────────────────────────────────────────────────
+        ortho_p_est, phosphorus_note = self._phosphorus_profile()
+
         # ── Narratives ────────────────────────────────────────────────────────
         enhanced_just = self._enhanced_justification(dose, dose_enhanced, mt_day(dose_enhanced), ca2_enh)
         walkthrough   = self._build_walkthrough(
             nh3_removed, net_alk_demand, influent_alk, dose, dose_min,
             dose_enhanced, mass, mass_mo, cpm, cpy, ca2_rec, ca2_enh,
-            t_risk_level, t_risk_note, assumptions,
+            t_risk_level, t_risk_note, assumptions, ortho_p_est, phosphorus_note,
         )
 
         return DoseRecommendation(
@@ -301,7 +321,48 @@ class IntakeRecommendationEngine:
             flow_scenarios           = scenarios,
             cost_band_low            = cost_band_low,
             cost_band_high           = cost_band_high,
+            influent_ortho_p_mgl     = ortho_p_est,
+            phosphorus_note          = phosphorus_note,
         )
+
+    # ── Phosphorus profile ────────────────────────────────────────────────────
+
+    def _phosphorus_profile(self) -> tuple[float | None, str]:
+        """
+        Translate whatever phosphorus value was entered (Total Phosphorus or
+        orthophosphate) into an estimated influent orthophosphate concentration,
+        and explain how that figure was derived.
+
+        This profile is informational only — phosphorus is not currently part
+        of the alkalinity/nitrogen balance that drives the GCC dose.
+        """
+        inp = self.inp
+        if inp.influent_p_mgl is None:
+            return None, ""
+
+        if inp.influent_p_form == PhosphorusForm.TOTAL:
+            ortho_p = round(inp.influent_p_mgl * ORTHO_P_FRACTION_OF_TP, 2)
+            note = (
+                f"You entered Total Phosphorus (TP) = {inp.influent_p_mgl:.1f} mg/L as P. "
+                f"In typical municipal wastewater, about {ORTHO_P_FRACTION_OF_TP*100:.0f}% of "
+                f"TP is orthophosphate — the soluble, reactive form. The rest is polyphosphate "
+                f"and organic phosphorus, most of which converts to orthophosphate during "
+                f"biological treatment (WEF Treatment Fundamentals I, Chapter 9). On that basis, "
+                f"influent orthophosphate is estimated at roughly {ortho_p:.1f} mg/L as P."
+            )
+        else:
+            ortho_p = round(inp.influent_p_mgl, 2)
+            note = (
+                f"You entered orthophosphate (ortho-P) directly = {ortho_p:.1f} mg/L as P — "
+                f"the soluble, reactive form of phosphorus, used as-is."
+            )
+
+        note += (
+            " Phosphorus does not change the GCC dose recommendation above, which is sized "
+            "from the alkalinity and nitrogen balance. This figure is recorded for the plant "
+            "profile and for any follow-on phosphorus-removal evaluation."
+        )
+        return ortho_p, note
 
     # ── Temperature / nitrification risk assessment ───────────────────────────
 
@@ -343,7 +404,7 @@ class IntakeRecommendationEngine:
                 f"At {temp_c:.0f}°C, nitrification reliability is at risk — the assumed SRT of "
                 f"{ASSUMED_SRT_DAYS:.0f} d is below the theoretical minimum of {srt_min:.1f} d. "
                 f"A higher residual alkalinity target (120+ mg/L) is strongly recommended as a "
-                f"conservative buffer. Confirm actual SRT with the facility.",
+                f"conservative buffer. Confirm actual SRT with plant operations staff.",
             )
 
     # ── Enhanced justification ────────────────────────────────────────────────
@@ -358,18 +419,18 @@ class IntakeRecommendationEngine:
         ca2_note = (
             f"At this dose, GCC dissolution introduces approximately {ca2_enh:.2f} meq/L of "
             f"free Ca²⁺ ions — "
-            + ("exceeding" if ca2_enh >= CA2_MEQL_FLOC_MIN else "approaching")
-            + f" the peer-reviewed minimum of {CA2_MEQL_FLOC_MIN:.1f} meq/L required for stable "
-            f"biofloc formation (Grady, Daigger & Love; Biggs et al. 2001). "
+            + ("within or above" if ca2_enh >= CA2_MEQL_FLOC_MIN else "approaching")
+            + f" the {CA2_MEQL_FLOC_MIN:.1f}–{CA2_MEQL_FLOC_OPTIMAL:.1f} meq/L range "
+            f"associated with good floc formation and settling (Grady, Daigger & Love; "
+            f"Biggs et al. 2001). "
         )
 
         dic_note = (
-            "Unlike caustic soda or magnesium hydroxide, CREW's soluble CaCO₃ simultaneously "
-            "provides bicarbonate as a dissolved inorganic carbon (DIC) source for autotrophic "
-            "nitrifier growth — the carbon substrate AOB and NOB require to build biomass. "
-            "This mechanistic advantage means equivalent alkalinity from CaCO₃ delivers more "
-            "stable nitrification than equivalent alkalinity from hydroxide-only sources "
-            "(Metcalf & Eddy 5e; WEF Treatment Fundamentals)."
+            "Unlike caustic soda or magnesium hydroxide, CREW's soluble CaCO₃ also supplies "
+            "carbonate and bicarbonate — the inorganic carbon that nitrifying (autotrophic) "
+            "bacteria use as their carbon source for cell growth (WEF Treatment Fundamentals; "
+            "Metcalf & Eddy 5e). An equivalent dose of alkalinity from a hydroxide-only "
+            "source does not provide this additional carbon supply."
         )
 
         if delta_mgl < 1.0:
@@ -383,38 +444,38 @@ class IntakeRecommendationEngine:
         if scenario == CommercialScenario.ALKALINITY_REPLACEMENT:
             return (
                 f"Dosing an additional {delta_mgl:.0f} mg/L above the baseline replacement "
-                f"rate — targeting a bioreactor residual of {ENHANCED_RESIDUAL_ALK:.0f} mg/L as "
+                f"rate — targeting an aeration basin residual of {ENHANCED_RESIDUAL_ALK:.0f} mg/L as "
                 f"CaCO₃ ({dose_enhanced:.0f} mg/L GCC, {mt_enhanced_per_day:.2f} MT/day) — "
                 f"activates CREW's Alkalinity-Enhanced Mode™ (AEM). "
                 f"{ca2_note}"
-                f"The improved monovalent:divalent cation ratio increases floc stability and "
-                f"prevents sludge bulking, lowering SVI and sludge blanket levels in secondary "
-                f"clarifiers. Enhanced pH buffering reduces variability during peak loads, "
-                f"sustaining nitrification rates and biological phosphorus removal (BioP). "
-                f"These compounding benefits can reduce aeration energy demand and decrease "
+                f"Free Ca²⁺ ions support good floc formation and settling, helping prevent "
+                f"sludge bulking and lowering SVI and sludge blanket levels in the secondary "
+                f"clarifiers. The added pH buffering reduces variability during peak loads, "
+                f"supporting stable nitrification and enhanced biological phosphorus removal "
+                f"(EBPR). These combined effects can reduce aeration energy demand and decrease "
                 f"reliance on coagulants and polymers — partially or fully offsetting the "
                 f"incremental chemical cost. "
                 f"{dic_note} "
-                f"CREW has observed consistent process intensification outcomes at residual "
-                f"targets of {ENHANCED_RESIDUAL_ALK:.0f} mg/L and above across full-scale facilities."
+                f"CREW has observed these benefits consistently at plants operating with "
+                f"residual alkalinity targets of {ENHANCED_RESIDUAL_ALK:.0f} mg/L and above."
             )
         else:
             return (
-                f"The baseline dose of {dose:.0f} mg/L meets the facility's stated process "
-                f"goals. Dosing to a bioreactor alkalinity target of "
+                f"The baseline dose of {dose:.0f} mg/L meets the plant's stated process "
+                f"goals. Dosing to an aeration basin alkalinity target of "
                 f"{ENHANCED_RESIDUAL_ALK:.0f} mg/L ({dose_enhanced:.0f} mg/L GCC, "
                 f"{mt_enhanced_per_day:.2f} MT/day) unlocks the full AEM™ performance envelope. "
                 f"{ca2_note}"
-                f"The improved monovalent:divalent cation ratio from free Ca²⁺ ions enhances "
-                f"floc stability and prevents bulking — lowering SVI, TSS, and sludge blanket "
-                f"levels. Increased alkalinity buffering capacity stabilizes pH against diurnal "
-                f"and storm-driven load swings, protecting nitrifier populations and sustaining "
-                f"BNR performance under variable influent conditions. These compounding effects "
-                f"can increase secondary treatment throughput within existing infrastructure and "
-                f"reduce blower energy consumption. "
+                f"Free Ca²⁺ ions support good floc formation and settling, helping prevent "
+                f"bulking — lowering SVI, TSS, and sludge blanket levels. The added alkalinity "
+                f"buffering capacity stabilizes pH against diurnal and storm-driven load "
+                f"swings, protecting nitrifying organisms and sustaining biological nutrient "
+                f"removal (BNR) performance under variable influent conditions. These combined "
+                f"effects can increase secondary treatment throughput within existing "
+                f"infrastructure and reduce blower energy consumption. "
                 f"{dic_note} "
-                f"CREW has observed consistent process intensification outcomes at residual "
-                f"targets of {ENHANCED_RESIDUAL_ALK:.0f} mg/L and above across full-scale facilities."
+                f"CREW has observed these benefits consistently at plants operating with "
+                f"residual alkalinity targets of {ENHANCED_RESIDUAL_ALK:.0f} mg/L and above."
             )
 
     # ── Calculation walkthrough ───────────────────────────────────────────────
@@ -427,6 +488,7 @@ class IntakeRecommendationEngine:
         ca2_rec: float, ca2_enh: float,
         t_risk_level: str | None, t_risk_note: str,
         assumptions: list[str],
+        ortho_p_est: float | None, phosphorus_note: str,
     ) -> str:
         inp = self.inp
         eff = inp.dissolution_efficiency
@@ -451,6 +513,8 @@ class IntakeRecommendationEngine:
             w(f"- Influent NH₃-N: **assumed {ASSUMED_INFLUENT_NH3:.0f} mg/L** (not measured)")
         if inp.wastewater_temp_c is not None:
             w(f"- Wastewater temperature: **{inp.wastewater_temp_c:.1f}°C**")
+        if inp.influent_p_mgl is not None:
+            w(f"- Influent phosphorus ({inp.influent_p_form.value}): **{inp.influent_p_mgl:.1f} mg/L as P**")
         if assumptions:
             w("")
             w("**Assumptions applied:**")
@@ -515,19 +579,35 @@ class IntakeRecommendationEngine:
 
         w("")
         w("### 6. Ca²⁺ Ion Contribution")
-        w("CaCO₃ is the only common alkalinity source that releases free Ca²⁺ ions on dissolution.")
+        w("Unlike hydroxide- or bicarbonate-based alkalinity sources, CaCO₃ dissolution also releases free Ca²⁺ ions on a 1:1 molar basis.")
         w("Basis: MW CaCO₃ = 100 g/mol, Ca²⁺ is divalent → 1 mg/L CaCO₃ = 0.02 meq/L Ca²⁺")
         w(f"- At recommended dose ({dose:.0f} mg/L, {eff*100:.0f}% dissolution):")
         w(f"  {dose:.1f} × {eff:.2f} × {CA2_MEQL_PER_MGL_CACO3} = **{ca2_rec:.3f} meq/L Ca²⁺**")
         w(f"- At enhanced dose ({dose_enhanced:.0f} mg/L):")
         w(f"  {dose_enhanced:.1f} × {eff:.2f} × {CA2_MEQL_PER_MGL_CACO3} = **{ca2_enh:.3f} meq/L Ca²⁺**")
-        w(f"- Literature minimum for stable biofloc: **{CA2_MEQL_FLOC_MIN:.1f} meq/L** (Grady, Daigger & Love; Biggs et al. 2001)")
-        status = "✓ Exceeds" if ca2_enh >= CA2_MEQL_FLOC_MIN else "⚠ Below"
-        w(f"- Enhanced dose Ca²⁺ vs. threshold: **{status} minimum** ({ca2_enh:.3f} vs {CA2_MEQL_FLOC_MIN:.1f} meq/L)")
+        w(f"- Range associated with good floc settling: **{CA2_MEQL_FLOC_MIN:.1f}–{CA2_MEQL_FLOC_OPTIMAL:.1f} meq/L** (Grady, Daigger & Love; Biggs et al. 2001)")
+        status = "✓ Meets or exceeds" if ca2_enh >= CA2_MEQL_FLOC_MIN else "⚠ Below"
+        w(f"- Enhanced dose Ca²⁺ vs. lower end of range: **{status}** ({ca2_enh:.3f} vs {CA2_MEQL_FLOC_MIN:.1f} meq/L)")
+
+        section_num = 7
+
+        if inp.influent_p_mgl is not None:
+            w("")
+            w(f"### {section_num}. Phosphorus Profile")
+            section_num += 1
+            w(phosphorus_note)
+            if inp.influent_p_form == PhosphorusForm.TOTAL and ortho_p_est is not None:
+                w("")
+                w(f"- Total phosphorus entered: **{inp.influent_p_mgl:.1f} mg/L as P**")
+                w(f"- Estimated orthophosphate = {inp.influent_p_mgl:.1f} × {ORTHO_P_FRACTION_OF_TP:.2f} = **{ortho_p_est:.1f} mg/L as P**")
+            else:
+                w("")
+                w(f"- Orthophosphate entered directly: **{ortho_p_est:.1f} mg/L as P**")
 
         if inp.wastewater_temp_c is not None and t_risk_level:
             w("")
-            w("### 7. Temperature / Nitrification Risk Assessment")
+            w(f"### {section_num}. Temperature / Nitrification Risk Assessment")
+            section_num += 1
             w(f"Arrhenius correction: µ_max(T) = {MU_MAX_AOB_20C:.2f} × {THETA_NITRIFICATION}^(T−20)")
             mu_T = MU_MAX_AOB_20C * (THETA_NITRIFICATION ** (inp.wastewater_temp_c - 20))
             w(f"- At {inp.wastewater_temp_c:.1f}°C: µ_max = {MU_MAX_AOB_20C:.2f} × {THETA_NITRIFICATION}^({inp.wastewater_temp_c:.1f}−20) = **{mu_T:.3f} d⁻¹**")
@@ -537,16 +617,16 @@ class IntakeRecommendationEngine:
                 w(f"- Net growth = {mu_T:.3f} − {B_DECAY_AOB:.2f} = {net_growth:.3f} d⁻¹")
                 w(f"- Minimum SRT = 1 ÷ {net_growth:.3f} = **{srt_min:.1f} days**")
                 w(f"- Design SRT ({SRT_SAFETY_FACTOR:.1f}× safety) = **{srt_min * SRT_SAFETY_FACTOR:.1f} days**")
-                w(f"- Assumed facility SRT: **{ASSUMED_SRT_DAYS:.0f} days** (conservative reference)")
+                w(f"- Assumed plant SRT: **{ASSUMED_SRT_DAYS:.0f} days** (conservative reference)")
             w(f"- Risk level: **{t_risk_level}**")
             w(f"- {t_risk_note}")
 
         w("")
         w("---")
-        w(f"*Prepared using CREW Facility Intake Engine. All stoichiometric constants per*")
+        w(f"*Prepared using the CREW Plant Intake Engine. All stoichiometric constants per*")
         w(f"*WEF Basic Laboratory Procedures (2011), Metcalf & Eddy Wastewater Engineering 5e,*")
         w(f"*and WEF MOP 37 — Operation of Nutrient Removal Facilities.*")
-        w(f"*Assumed SRT: {ASSUMED_SRT_DAYS:.0f} days (conservative BNR reference; confirm with facility).*")
+        w(f"*Assumed SRT: {ASSUMED_SRT_DAYS:.0f} days (conservative reference; confirm against actual plant operating data).*")
         w(f"*Site-specific sampling is recommended before implementation.*")
 
         return "\n".join(lines)

@@ -22,3 +22,6 @@ env/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Reference documents (too large for git)
+*.pdf
