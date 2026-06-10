@@ -375,8 +375,10 @@ with st.sidebar:
             help="Combined TN permit limit (NH₃ + NO₃ + NO₂ + organic N). "
                  "If not provided: only nitrification demand is considered.")
         target_tp  = _opt("Total phosphorus (TP) limit",
-            help="Effluent TP limit. "
-                 "If not provided: phosphorus is excluded from the alkalinity demand calculation.")
+            help="Effluent TP limit. Recorded for the plant profile — phosphorus does not "
+                 "change the GCC dose recommendation, which is based on the alkalinity and "
+                 "nitrogen balance above. "
+                 "If not provided: phosphorus is omitted from the report.")
 
     with st.expander("⚙️ Operational / settling data"):
         st.caption("From the plant's MLSS or settleability records.")
@@ -663,6 +665,17 @@ if commercial_scenario == CommercialScenario.ALKALINITY_REPLACEMENT and existing
         f"<span class='{css_class}'><b>{ann_sign}${abs(ann_delta):,.0f}/yr</b></span>",
         unsafe_allow_html=True,
     )
+    if rec.dose_mgl <= 0:
+        st.warning(
+            "⚠️ **No GCC dose is currently recommended.** Based on the alkalinity and "
+            "nitrogen balance above, influent alkalinity already covers the process "
+            "demand at the target residual, so the comparison above shows $0 GCC cost. "
+            "This does not necessarily mean the current chemical spend is unneeded — it "
+            "may also serve purposes outside this alkalinity balance (pH control, "
+            "phosphorus removal, etc.). Review the influent alkalinity, pH, and target "
+            "residual inputs, or see the calculation walkthrough below, before presenting "
+            "this comparison."
+        )
     st.caption(
         f"{existing_chemical} alkalinity equivalence: "
         f"{ALK_CHEMICAL_EQUIVALENCE[existing_chemical]:.2f} kg CaCO₃-eq / kg product. "
@@ -1078,6 +1091,17 @@ def build_pdf(
             f"{chem_name} equivalence: {ALK_CHEMICAL_EQUIVALENCE.get(chem_name, 'N/A')} kg CaCO₃-eq/kg product.",
             caption_s,
         ))
+        if r.dose_mgl <= 0:
+            story.append(Spacer(1, 3))
+            story.append(Paragraph(
+                "No GCC dose is currently recommended: influent alkalinity already covers "
+                "process demand at the target residual, so the comparison above shows $0 "
+                "GCC cost. This does not necessarily mean the current chemical spend is "
+                "unneeded — it may also serve purposes outside this alkalinity balance "
+                "(pH control, phosphorus removal, etc.). Review influent alkalinity, pH, "
+                "and target residual inputs before presenting this comparison.",
+                caption_s,
+            ))
         story.append(Spacer(1, 8))
 
     # ── Calculation basis ─────────────────────────────────────────────────────
