@@ -287,7 +287,7 @@ with st.sidebar:
     st.divider()
 
     with st.expander("💧 Influent water quality readings", expanded=True):
-        st.caption("Enter whatever values you have from a recent lab report.")
+        st.caption("Enter whatever values you have from a recent data share.")
         influent_nh3 = _opt("Ammonia, NH₃-N",
             help="Incoming ammonia nitrogen (NH₃-N). "
                  "If not provided: 30 mg/L is assumed — typical municipal influent. "
@@ -305,7 +305,7 @@ with st.sidebar:
             options=[f.value for f in PhosphorusForm],
             horizontal=True,
             help=(
-                "Select how phosphorus is reported on your lab sheet. Total Phosphorus (TP) "
+                "Select how phosphorus is reported in the data set. Total Phosphorus (TP) "
                 "includes orthophosphate, polyphosphate, and organic phosphorus. "
                 "Orthophosphate (ortho-P) is the soluble, reactive form only."
             ),
