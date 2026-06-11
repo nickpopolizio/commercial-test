@@ -465,6 +465,10 @@ st.markdown(
     f"**{fname}** &nbsp;·&nbsp; {_flow_label} &nbsp;·&nbsp; "
     f"*{commercial_scenario.value}*"
 )
+
+for _w in rec.input_warnings:
+    st.error(f"🚫 **Check your inputs:** {_w}")
+
 st.divider()
 
 

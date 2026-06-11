@@ -176,6 +176,9 @@ class DoseRecommendation:
     denitrification_credit_applied: bool = True
     potential_alk_recovery_mgl: float = 0.0   # mg/L CaCO₃ recoverable if plant fully denitrifies
 
+    # Input sanity warnings (e.g., effluent target ≥ influent value)
+    input_warnings: list[str] = field(default_factory=list)
+
 
 @dataclass
 class FlowScenario:
@@ -211,6 +214,7 @@ class IntakeRecommendationEngine:
     # ── Public ────────────────────────────────────────────────────────────────
 
     def recommend(self) -> DoseRecommendation:
+        input_warnings              = self._input_warnings()
         nh3_removed, net_alk_demand, _alk_consumed, denit_credit_applied = self._nitrogen_demand()
         influent_alk                = self._effective_influent_alkalinity()
 
@@ -337,6 +341,7 @@ class IntakeRecommendationEngine:
             phosphorus_note          = phosphorus_note,
             denitrification_credit_applied = denit_credit_applied,
             potential_alk_recovery_mgl      = potential_alk_recovery,
+            input_warnings           = input_warnings,
         )
 
     # ── Phosphorus profile ────────────────────────────────────────────────────
@@ -714,6 +719,34 @@ class IntakeRecommendationEngine:
             dilution_factor  = round(df, 3),
             note             = note,
         )
+
+    # ── Input sanity checks ───────────────────────────────────────────────────
+
+    def _input_warnings(self) -> list[str]:
+        """
+        Flag effluent targets that are at or above the corresponding influent
+        value. nh3_removed = max(0.0, influent_nh3 - target_nh3) silently clamps
+        to zero in that case, zeroing the nitrification alkalinity demand and
+        potentially driving the recommended dose to 0 with no other indication.
+        """
+        inp = self.inp
+        warnings: list[str] = []
+
+        if inp.target_nh3_mgl is not None:
+            influent_nh3 = inp.influent_nh3_mgl if inp.influent_nh3_mgl is not None \
+                           else ASSUMED_INFLUENT_NH3
+            basis = "measured" if inp.influent_nh3_mgl is not None else "assumed (not measured)"
+            if inp.target_nh3_mgl >= influent_nh3:
+                warnings.append(
+                    f"Effluent NH₃-N target ({inp.target_nh3_mgl:.1f} mg/L) is at or above the "
+                    f"{basis} influent NH₃-N ({influent_nh3:.1f} mg/L). This implies zero "
+                    f"nitrification demand and can drive the recommended GCC dose toward 0, "
+                    f"regardless of the alkalinity balance. Typical NH₃-N effluent limits are "
+                    f"1-10 mg/L. Double-check this value — if uncertain, clear the effluent "
+                    f"NH₃-N field (assumes full nitrification to 3 mg/L, conservative)."
+                )
+
+        return warnings
 
     # ── Nitrogen demand ───────────────────────────────────────────────────────
 
