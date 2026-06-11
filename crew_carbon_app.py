@@ -518,6 +518,17 @@ with col_metrics:
     st.markdown("<br>", unsafe_allow_html=True)
     st.info(f"**How we calculated this:**\n\n{rec.explanation}")
 
+    if not rec.denitrification_credit_applied and rec.potential_alk_recovery_mgl > 0:
+        st.warning(
+            f"⚠️ **No denitrification credit applied.** No effluent NO₃-N or TN target "
+            f"was entered, so this dose assumes 0% alkalinity recovery from "
+            f"denitrification. If this plant denitrifies, up to "
+            f"**{rec.potential_alk_recovery_mgl:.0f} mg/L as CaCO₃** could be recovered "
+            f"(3.57 mg CaCO₃ per mg NO₃-N denitrified) — roughly halving the alkalinity "
+            f"demand from nitrification and lowering the dose accordingly. Enter an "
+            f"NO₃-N or TN target in 'Effluent permit limits / targets' to credit this."
+        )
+
 
 # ── Dose bands ────────────────────────────────────────────────────────────────
 

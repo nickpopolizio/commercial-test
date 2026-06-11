@@ -172,6 +172,10 @@ class DoseRecommendation:
     influent_ortho_p_mgl: float | None = None   # estimated reactive orthophosphate, mg/L as P
     phosphorus_note: str = ""
 
+    # Denitrification credit
+    denitrification_credit_applied: bool = True
+    potential_alk_recovery_mgl: float = 0.0   # mg/L CaCO₃ recoverable if plant fully denitrifies
+
 
 @dataclass
 class FlowScenario:
@@ -207,13 +211,21 @@ class IntakeRecommendationEngine:
     # ── Public ────────────────────────────────────────────────────────────────
 
     def recommend(self) -> DoseRecommendation:
-        nh3_removed, net_alk_demand = self._nitrogen_demand()
+        nh3_removed, net_alk_demand, _alk_consumed, denit_credit_applied = self._nitrogen_demand()
         influent_alk                = self._effective_influent_alkalinity()
 
         dose, confidence, method, explanation, assumptions = self._select_path(
             nh3_removed, net_alk_demand, influent_alk
         )
         dose = max(0.0, min(dose, 300.0))
+
+        # ── Denitrification credit check ─────────────────────────────────────
+        # If no NO₃-N or TN target was entered, the engine assumes 0% alkalinity
+        # recovery from denitrification (conservative). Surface how much could be
+        # recovered if the plant fully denitrifies, so the UI can flag this.
+        potential_alk_recovery = (
+            0.0 if denit_credit_applied else round(nh3_removed * ALK_RECOVERED_PER_NO3, 1)
+        )
 
         eff = self.inp.dissolution_efficiency
 
@@ -323,6 +335,8 @@ class IntakeRecommendationEngine:
             cost_band_high           = cost_band_high,
             influent_ortho_p_mgl     = ortho_p_est,
             phosphorus_note          = phosphorus_note,
+            denitrification_credit_applied = denit_credit_applied,
+            potential_alk_recovery_mgl      = potential_alk_recovery,
         )
 
     # ── Phosphorus profile ────────────────────────────────────────────────────
@@ -703,7 +717,8 @@ class IntakeRecommendationEngine:
 
     # ── Nitrogen demand ───────────────────────────────────────────────────────
 
-    def _nitrogen_demand(self) -> tuple[float, float]:
+    def _nitrogen_demand(self) -> tuple[float, float, float, bool]:
+        """Returns (nh3_removed, net_alk_demand, alk_consumed, denit_credit_applied)."""
         inp = self.inp
 
         influent_nh3 = inp.influent_nh3_mgl if inp.influent_nh3_mgl is not None \
@@ -722,12 +737,14 @@ class IntakeRecommendationEngine:
         if target_no3 is None and inp.target_tn_mgl is not None:
             target_no3 = max(0.0, inp.target_tn_mgl - (target_nh3 or 0))
 
+        denit_credit_applied = target_no3 is not None
         alk_recovered = 0.0
-        if target_no3 is not None:
+        if denit_credit_applied:
             no3_denitrified = max(0.0, nh3_removed - target_no3)
             alk_recovered   = no3_denitrified * ALK_RECOVERED_PER_NO3
 
-        return nh3_removed, max(0.0, alk_consumed - alk_recovered)
+        net_alk_demand = max(0.0, alk_consumed - alk_recovered)
+        return nh3_removed, net_alk_demand, alk_consumed, denit_credit_applied
 
     # ── Effective influent alkalinity ─────────────────────────────────────────
 
@@ -737,6 +754,21 @@ class IntakeRecommendationEngine:
         if self.inp.influent_ph is not None:
             return self._alk_from_ph(self.inp.influent_ph)
         return ASSUMED_INFLUENT_ALK
+
+    @staticmethod
+    def _usable_above_residual(alk: float, target_res: float) -> tuple[float, str]:
+        """
+        Alkalinity available above the target residual. Can be negative if the
+        influent (or estimated) alkalinity is already below the residual target —
+        this must NOT be clamped to zero, since dose_from_balance() doesn't clamp
+        it either; doing so would understate the deficit shown to the user.
+        """
+        usable = round(alk - target_res, 1)
+        if usable >= 0:
+            phrase = f"provides {usable:.0f} mg/L usable above the {target_res:.0f} mg/L safety residual"
+        else:
+            phrase = f"is already {abs(usable):.0f} mg/L below the {target_res:.0f} mg/L safety residual"
+        return usable, phrase
 
     @staticmethod
     def _alk_from_ph(ph: float) -> float:
@@ -774,19 +806,28 @@ class IntakeRecommendationEngine:
         if nh3_known and alk_measured and target_known:
             dose = dose_from_balance(influent_alk)
             _alk_consumed  = round(nh3_removed * ALK_CONSUMED_PER_NH3, 1)
-            _usable_influent = round(max(0.0, influent_alk - target_res), 1)
+            _alk_recovered = round(_alk_consumed - net_alk_demand, 1)
+            _usable_influent, _usable_phrase = self._usable_above_residual(influent_alk, target_res)
             _deficit       = round(max(0.0, net_alk_demand - _usable_influent), 1)
+
+            _denit_note = ""
+            if _alk_recovered > 0.01:
+                _denit_note = (
+                    f"Denitrification recovers {_alk_recovered:.0f} mg/L of that, for a net "
+                    f"demand of {net_alk_demand:.0f} mg/L. "
+                )
+
             return (
                 dose, Confidence.HIGH,
                 "Full stoichiometric alkalinity mass balance",
                 (
                     f"Nitrification of {nh3_removed:.1f} mg/L NH₃-N consumes "
                     f"{_alk_consumed:.0f} mg/L of alkalinity (7.14 mg CaCO₃ per mg NH₃-N). "
-                    f"Influent alkalinity of {influent_alk:.0f} mg/L provides "
-                    f"{_usable_influent:.0f} mg/L usable above the {target_res:.0f} mg/L safety residual. "
+                    f"{_denit_note}"
+                    f"Influent alkalinity of {influent_alk:.0f} mg/L {_usable_phrase}. "
                     + (f"This covers the full demand — only a small maintenance dose is needed."
                        if dose < 10 else
-                       f"Deficit = {_alk_consumed:.0f} − {_usable_influent:.0f} = {_deficit:.0f} mg/L "
+                       f"Deficit = {net_alk_demand:.0f} − ({_usable_influent:.0f}) = {_deficit:.0f} mg/L "
                        f"must be supplemented. At {eff*100:.0f}% dissolution, "
                        f"a dose of {dose:.0f} mg/L GCC closes this gap and maintains "
                        f"the {target_res:.0f} mg/L safety residual.")
@@ -804,18 +845,17 @@ class IntakeRecommendationEngine:
                 assumptions.append("Full nitrification to 3 mg/L assumed (conservative)")
 
             dose = dose_from_balance(influent_alk)
-            _usable_influent = round(max(0.0, influent_alk - target_res), 1)
+            _usable_influent, _usable_phrase = self._usable_above_residual(influent_alk, target_res)
             _deficit         = round(max(0.0, net_alk_demand - _usable_influent), 1)
             return (
                 dose, Confidence.MEDIUM,
                 "Alkalinity deficit calculation with estimated nitrogen demand",
                 (
                     f"Estimated nitrification demand: {net_alk_demand:.0f} mg/L as CaCO₃. "
-                    f"Influent alkalinity of {influent_alk:.0f} mg/L provides "
-                    f"{_usable_influent:.0f} mg/L usable above the {target_res:.0f} mg/L safety residual. "
+                    f"Influent alkalinity of {influent_alk:.0f} mg/L {_usable_phrase}. "
                     + (f"This covers the full demand — only a small maintenance dose is needed."
                        if dose < 10 else
-                       f"Deficit = {net_alk_demand:.0f} − {_usable_influent:.0f} = {_deficit:.0f} mg/L. "
+                       f"Deficit = {net_alk_demand:.0f} − ({_usable_influent:.0f}) = {_deficit:.0f} mg/L. "
                        f"At {eff*100:.0f}% dissolution, a dose of {dose:.0f} mg/L GCC closes this gap. "
                        f"Entering effluent permit limits will refine this further.")
                 ),
@@ -833,16 +873,16 @@ class IntakeRecommendationEngine:
                 assumptions.append(f"Incoming ammonia assumed {ASSUMED_INFLUENT_NH3:.0f} mg/L")
 
             dose = dose_from_balance(est_alk)
-            _usable_ph = round(max(0.0, est_alk - target_res), 1)
+            _usable_ph, _usable_phrase = self._usable_above_residual(est_alk, target_res)
             _deficit_ph = round(max(0.0, net_alk_demand - _usable_ph), 1)
             return (
                 dose, Confidence.LOW,
                 "pH-derived alkalinity estimate",
                 (
                     f"A pH of {inp.influent_ph:.1f} suggests an influent alkalinity of roughly "
-                    f"{est_alk:.0f} mg/L as CaCO₃, providing {_usable_ph:.0f} mg/L usable above "
-                    f"the {target_res:.0f} mg/L safety residual. Against a nitrification demand of "
-                    f"{net_alk_demand:.0f} mg/L, this leaves a deficit of {_deficit_ph:.0f} mg/L. "
+                    f"{est_alk:.0f} mg/L as CaCO₃, which {_usable_phrase}. Against a nitrification "
+                    f"demand of {net_alk_demand:.0f} mg/L, this leaves a deficit of "
+                    f"{_deficit_ph:.0f} mg/L. "
                     f"At {eff*100:.0f}% dissolution, {dose:.0f} mg/L GCC closes this gap. "
                     "Measuring alkalinity directly (5 minutes on-site) would move this to Medium–High confidence."
                 ),
@@ -854,14 +894,14 @@ class IntakeRecommendationEngine:
             assumptions.append(f"Incoming ammonia assumed {ASSUMED_INFLUENT_NH3:.0f} mg/L (typical municipal)")
             assumptions.append(f"Influent alkalinity assumed {ASSUMED_INFLUENT_ALK:.0f} mg/L (typical municipal)")
             dose = dose_from_balance(ASSUMED_INFLUENT_ALK)
-            _usable_d = round(max(0.0, ASSUMED_INFLUENT_ALK - target_res), 1)
+            _usable_d, _usable_phrase = self._usable_above_residual(ASSUMED_INFLUENT_ALK, target_res)
             _deficit_d = round(max(0.0, net_alk_demand - _usable_d), 1)
             return (
                 dose, Confidence.LOW,
                 "Permit-limit estimate using assumed influent quality",
                 (
-                    f"Assuming typical influent alkalinity of {ASSUMED_INFLUENT_ALK:.0f} mg/L, "
-                    f"{_usable_d:.0f} mg/L is usable above the {target_res:.0f} mg/L safety residual. "
+                    f"Assuming typical influent alkalinity of {ASSUMED_INFLUENT_ALK:.0f} mg/L, which "
+                    f"{_usable_phrase}. "
                     f"Against an estimated nitrification demand of {net_alk_demand:.0f} mg/L, "
                     f"the deficit is {_deficit_d:.0f} mg/L, requiring {dose:.0f} mg/L GCC at "
                     f"{eff*100:.0f}% dissolution. This estimate could vary significantly — entering "
